@@ -21,6 +21,7 @@ def stream_framereader(
     output_path: os.PathLike,
     batch_size: int,
     progress=True,
+    start: int = 0,
 ):
     # Normalize paths
     input_path = str(Path(input_path))
@@ -40,9 +41,9 @@ def stream_framereader(
 
         # Set up optional progress indicator
         if progress:
-            iterator = tqdm.trange(0, reader.max_frames, batch_size)
+            iterator = tqdm.trange(start, reader.max_frames, batch_size)
         else:
-            iterator = range(0, reader.max_frames, batch_size)
+            iterator = range(start, reader.max_frames, batch_size)
 
         # Write batches of frames to the movie archive
         for i in iterator:
@@ -60,12 +61,21 @@ def _cli(argv):
     # Mode + paths
     add_stream_conversion_args(parser)
 
+    # Manual resume
+    parser.add_argument(
+        "--start",
+        type=int,
+        default=0,
+        help="Resume conversion some number of frames into the video.",
+    )
+
     args = parser.parse_args(argv)
 
     input_path = args.input
     output_path = args.output
     batch_size = args.batch_size
     progress = not args.no_progress
+    start = args.start
 
     # Basic validation
     if batch_size <= 0:
@@ -85,6 +95,7 @@ def _cli(argv):
             output_path=str(output_path),
             batch_size=batch_size,
             progress=progress,
+            start=start,
         )
     except Exception as exc:
         # surface a useful message and re-raise to keep traceback if running from CLI
