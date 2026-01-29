@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imaging_scripts"
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = [
+    "h5py",
+    "scipy",
+    "scikit-image",
+    "matplotlib",
+    "seaborn",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+io = [
+    "array-api-compat",
+]
+dev = [
+    "imageio[pyav]",
+    "pytest"
+]
+gui = [
+    "pyside6",
+    "pyqtgraph",
+]
+
+[tool.setuptools]
+packages = [
+    "imaging_scripts",
+    "imaging_scripts.io",
+    "imaging_scripts.lab_scripts",
+    "imaging_scripts.timeseries",
+    "imaging_scripts.toy_data",
+    "imaging_scripts.roigui"
+]
+
+[tool.setuptools.package-dir]
+imaging_scripts = "."
