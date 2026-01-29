@@ -1027,7 +1027,7 @@ class ROIDetailSection(QFrame):
             weight_img[r - r_min, c - c_min] = candidate.weights[i] - weight_min
 
         self.weight_image.setImage(
-            weight_img.T, levels=(0, candidate.weights.max() - weight_min())
+            weight_img.T, levels=(0, candidate.weights.max() - weight_min)
         )
         self.weight_plot.autoRange()
 
