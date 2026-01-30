@@ -88,131 +88,90 @@ class SVDVideo:
         arr, filter, dim="t", axes=None, pad_mode=None, pad_value=None
     ) -> "SVDVideo":
         """
-        arr: (component, time,) or (component, spatial1, ..., spatialN)
-        filter: array (n_kernels..., kernel_sizes..,)
-            Shape `n_kernels...` can have at most ndim=1 for temporal filter to
-            maintain (component, time,) output shape. For spatial filtering,
-            `n_kernels` can be any number of dimensions and the spatial shape
-            of the resulting video will be higher dimensional.
-        axes: tuple of int
-            When `dim` indicated spatial convolution, axes indicates the
-            dimensions of the video object expected in the filter array.
-            If not provided in that case, `kernel.ndim` is expected to be at least
-            `ndim_spatial`. Spatial dimensions are 1-indexed, to account for the
-            temporal dimension.
+        Convolve array along specified axes.
+
+        Parameters
+        ----------
+        arr : array (component, dim1, ..., dimN)
+        filter : array (n_kernels..., kernel_size1, ..., kernel_sizeM)
+            Last M dimensions are kernel sizes for M convolution axes.
+        dim : str
+            "t"/"time"/"row" for temporal (equiv. to axes=(1,)), else spatial.
+        axes : tuple of int
+            Axes to convolve over (1-indexed). Default: all spatial axes.
         """
         xp = array_namespace(arr)
-
         pad_mode = pad_mode or 'constant'
         pad_value = pad_value if pad_value is not None else 0.0
 
-        is_temporal = SVDVideo._row_axis(dim)
-        ndim_spatial = arr.ndim - 1
+        # Temporal is spatial with axes=(1,)
+        if SVDVideo._row_axis(dim):
+            if filter.ndim != 1:
+                raise ValueError("Temporal filter must be 1D")
+            axes = (1,)
+        elif axes is None:
+            axes = tuple(range(1, arr.ndim))
+        axes = tuple(axes)
 
-        if is_temporal:
-            # arr: (C, T), filter: (K,)
-            assert filter.ndim == 1, "Temporal filter must be 1D"
+        n_spatial = arr.ndim - 1
+        n_conv = len(axes)
 
-            pad_width = filter.shape[0] // 2
+        # Parse filter: (n_kernels..., kernel_sizes...)
+        n_extra = filter.ndim - n_conv
+        n_kernels_shape = filter.shape[:n_extra] if n_extra > 0 else ()
+        kernel_sizes = filter.shape[n_extra:]
+        n_k = 1
+        for s in n_kernels_shape:
+            n_k *= s
 
-            if _backend(arr, "jax"):
-                import jax.lax  # type: ignore
+        # Flatten kernel batch: (n_k, k1, ..., kM)
+        filters = xp.reshape(filter, (n_k,) + kernel_sizes) if n_extra > 0 else filter[None]
 
-                lhs = arr[:, None, :]  # (C, 1, T)
-                rhs = filter[None, None, :]  # (1, 1, K)
+        # Full kernel shape with 1s for non-convolved axes
+        axes_set = set(axes)
+        full_kernel = tuple(
+            kernel_sizes[sum(1 for a in axes if a < i + 1)] if (i + 1) in axes_set else 1
+            for i in range(n_spatial)
+        )
 
-                filtered = jax.lax.conv_general_dilated(
-                    lhs, rhs,
-                    window_strides=(1,),
-                    padding=((pad_width, pad_width),),
-                    dimension_numbers=('NCH', 'OIH', 'NCH')
-                )
-                return filtered[:, 0, :]  # (C, T)
+        # Padding per spatial dim
+        padding = tuple(
+            (kernel_sizes[sum(1 for a in axes if a < i + 1)] // 2,) * 2
+            if (i + 1) in axes_set else (0, 0)
+            for i in range(n_spatial)
+        )
 
-            elif _backend(arr, "numpy"):
-                from scipy.ndimage import convolve  # type: ignore
+        if _backend(arr, "jax"):
+            import jax.lax  # type: ignore
 
-                kernel = xp.reshape(filter, (1, -1))  # (1, K)
-                return convolve(arr, kernel, mode=pad_mode, cval=pad_value)
-            else:
-                raise RuntimeError("Unsupported backend for `convolve`.")
+            lhs = arr[:, None, ...]  # (C, 1, S...)
+            rhs = xp.reshape(filters, (n_k, 1) + full_kernel)
+
+            # Dimension spec with digits for unlimited spatial dims
+            dims = ''.join(str(i) for i in range(n_spatial))
+            spec = (f'NC{dims}', f'OI{dims}', f'NC{dims}')
+
+            out = jax.lax.conv_general_dilated(
+                lhs, rhs,
+                window_strides=(1,) * n_spatial,
+                padding=padding,
+                dimension_numbers=spec
+            )
+            return xp.reshape(out, (arr.shape[0],) + n_kernels_shape + out.shape[2:])
+
+        elif _backend(arr, "numpy"):
+            from scipy.ndimage import convolve  # type: ignore
+            import numpy as np  # type: ignore
+
+            conv_axes = tuple(range(1, arr.ndim))
+            out = np.stack([
+                convolve(arr, f.reshape(full_kernel), mode=pad_mode, cval=pad_value, axes=conv_axes)
+                for f in filters
+            ], axis=1)
+            return out.reshape((arr.shape[0],) + n_kernels_shape + out.shape[2:])
 
         else:
-            # Spatial convolution
-            # arr: (C, S1, ..., SN), filter: (n_k..., k1, ..., kM)
-
-            if axes is None:
-                axes = tuple(range(1, arr.ndim))
-
-            n_conv_axes = len(axes)
-            n_kernel_dims = filter.ndim - n_conv_axes
-            n_kernels_shape = filter.shape[:n_kernel_dims] if n_kernel_dims > 0 else ()
-            kernel_sizes = filter.shape[n_kernel_dims:]
-
-            n_k_total = 1
-            for s in n_kernels_shape:
-                n_k_total *= s
-
-            filter_flat = xp.reshape(filter, (n_k_total,) + kernel_sizes) if n_kernel_dims > 0 else filter[None]
-
-            # Build full kernel shape (1s for non-convolved dims)
-            full_kernel_shape = []
-            kernel_idx = 0
-            for i in range(1, arr.ndim):
-                if i in axes:
-                    full_kernel_shape.append(kernel_sizes[kernel_idx])
-                    kernel_idx += 1
-                else:
-                    full_kernel_shape.append(1)
-
-            if _backend(arr, "jax"):
-                import jax.lax  # type: ignore
-
-                filter_full = xp.reshape(filter_flat, (n_k_total,) + tuple(full_kernel_shape))
-
-                lhs = arr[:, None, ...]  # (C, 1, S1, ..., SN)
-                rhs = filter_full[:, None, ...]  # (n_k_total, 1, k1, ..., kN)
-
-                padding = []
-                kernel_idx = 0
-                for i in range(1, arr.ndim):
-                    if i in axes:
-                        pad_w = kernel_sizes[kernel_idx] // 2
-                        padding.append((pad_w, pad_w))
-                        kernel_idx += 1
-                    else:
-                        padding.append((0, 0))
-
-                spatial_chars = 'HWDXYZ'[:ndim_spatial]
-                dim_spec = ('NC' + spatial_chars, 'OI' + spatial_chars, 'NC' + spatial_chars)
-
-                filtered = jax.lax.conv_general_dilated(
-                    lhs, rhs,
-                    window_strides=(1,) * ndim_spatial,
-                    padding=tuple(padding),
-                    dimension_numbers=dim_spec
-                )
-                # (C, n_k_total, S1, ..., SN) -> (C, n_k1, ..., S1, ..., SN)
-                out_shape = (arr.shape[0],) + n_kernels_shape + filtered.shape[2:]
-                return xp.reshape(filtered, out_shape)
-
-            elif _backend(arr, "numpy"):
-                from scipy.ndimage import convolve  # type: ignore
-                import numpy as np  # type: ignore
-
-                full_kernel_shape_with_c = [1] + full_kernel_shape
-
-                results = []
-                for k in range(n_k_total):
-                    kernel = filter_flat[k].reshape(full_kernel_shape_with_c)
-                    res = convolve(arr, kernel, mode=pad_mode, cval=pad_value)
-                    results.append(res)
-
-                stacked = np.stack(results, axis=1)  # (C, n_k_total, S1, ..., SN)
-                out_shape = (arr.shape[0],) + n_kernels_shape + stacked.shape[2:]
-                return stacked.reshape(out_shape)
-            else:
-                raise RuntimeError("Unsupported backend for `convolve`.")
+            raise RuntimeError("Unsupported backend for `convolve`.")
         
     
     def add(self, temporal, spatial, amplitude=None, axes=None) -> 'SVDVideo':

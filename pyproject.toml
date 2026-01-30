@@ -13,6 +13,7 @@ dependencies = [
     "matplotlib",
     "seaborn",
     "tqdm",
+    "click"
 ]
 
 [project.optional-dependencies]

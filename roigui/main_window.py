@@ -16,10 +16,11 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import QPainterPath, QPen, QColor
+from PySide6.QtGui import QPainterPath, QPen, QColor, QBrush
 import pyqtgraph as pg
 
 from .state import AppState, EditMode, ViewMode
+from .keybindings import DEFAULT_BINDINGS
 from .roi import ROI, RefineState
 from .operations import extend_roi_watershed
 
@@ -57,6 +58,50 @@ class OutlineItem(pg.GraphicsObject):
         painter.drawPath(self._path)
 
 
+class FillItem(pg.GraphicsObject):
+    """Renders ROI pixels as semi-transparent fill overlay."""
+
+    def __init__(self, color: QColor, parent=None):
+        super().__init__(parent)
+        self._pixels: set = set()
+        self._color = color
+        self._path = QPainterPath()
+        self._visible = True
+
+    def set_pixels(self, pixels: set):
+        """Update fill from pixel set."""
+        self._pixels = pixels
+        self._rebuild_path()
+
+    def clear(self):
+        self._pixels = set()
+        self._path = QPainterPath()
+        self.prepareGeometryChange()
+        self.update()
+
+    def _rebuild_path(self):
+        self._path = QPainterPath()
+        for r, c in self._pixels:
+            self._path.addRect(c, r, 1, 1)
+        self.prepareGeometryChange()
+        self.update()
+
+    def set_fill_visible(self, visible: bool):
+        self._visible = visible
+        self.update()
+
+    def boundingRect(self):
+        return self._path.boundingRect()
+
+    def paint(self, painter, option, widget):
+        if not self._visible or not self._pixels:
+            return
+        painter.setPen(Qt.NoPen)
+        brush = QBrush(self._color, Qt.FDiagPattern)
+        painter.setBrush(brush)
+        painter.drawPath(self._path)
+
+
 class ImageView(pg.GraphicsLayoutWidget):
     """Main image display with ROI outline overlay and editing support."""
 
@@ -83,6 +128,15 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.candidate_outline._pen = QPen(QColor(0, 255, 255), 1)
         self.candidate_outline._pen.setCosmetic(True)
         self.plot.addItem(self.candidate_outline)
+
+        # Fill overlays (rendered below outlines)
+        self.roi_fill = FillItem(QColor(255, 255, 0, 100))  # Yellow, semi-transparent
+        self.plot.addItem(self.roi_fill)
+        self.additions_fill = FillItem(QColor(0, 255, 0, 100))  # Green
+        self.plot.addItem(self.additions_fill)
+        self.subtractions_fill = FillItem(QColor(255, 0, 0, 100))  # Red
+        self.plot.addItem(self.subtractions_fill)
+        self._show_fills = False
 
         # Other ROI outlines and labels (dimmed, for Show All mode)
         self._other_roi_outlines: list[OutlineItem] = []
@@ -134,14 +188,39 @@ class ImageView(pg.GraphicsLayoutWidget):
             self.roi_outline.set_boundary_edges(geom.boundary_edges)
         else:
             self.roi_outline.clear()
+        self._update_fills()
 
     def _on_candidate_changed(self):
-        """Update candidate outline."""
+        """Update candidate outline and fill overlays."""
         geom = self.state.candidate_geometry
         if geom is not None:
             self.candidate_outline.set_boundary_edges(geom.boundary_edges)
         else:
             self.candidate_outline.clear()
+        self._update_fills()
+
+    def _update_fills(self):
+        """Update fill overlays for ROI, additions, and subtractions."""
+        if not self._show_fills:
+            self.roi_fill.clear()
+            self.additions_fill.clear()
+            self.subtractions_fill.clear()
+            return
+
+        # ROI fill
+        if self.state.roi is not None:
+            self.roi_fill.set_pixels(self.state.roi.pixel_set)
+        else:
+            self.roi_fill.clear()
+
+        # Additions/subtractions
+        self.additions_fill.set_pixels(self.state.additions)
+        self.subtractions_fill.set_pixels(self.state.subtractions)
+
+    def set_show_fills(self, show: bool):
+        """Toggle fill visibility."""
+        self._show_fills = show
+        self._update_fills()
 
     def _on_edit_mode_changed(self, mode: EditMode):
         """Lock pan when in painting modes (scroll zoom still works)."""
@@ -388,7 +467,7 @@ class ToolButton(QPushButton):
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
-        self.setMinimumHeight(36)
+        self.setMinimumHeight(28)
         self.setStyleSheet(
             """
             QPushButton {
@@ -396,8 +475,8 @@ class ToolButton(QPushButton):
                 border: 1px solid #555;
                 border-radius: 4px;
                 color: #ddd;
-                padding: 8px;
-                text-align: left;
+                padding: 4px 6px;
+                text-align: center;
             }
             QPushButton:hover {
                 background-color: #4a4a4a;
@@ -418,14 +497,14 @@ class ToolsSection(QFrame):
         self.state = state
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
 
         label = QLabel("Tools")
         label.setStyleSheet("color: #aaa; font-weight: bold;")
         layout.addWidget(label)
 
-        # Tool buttons
+        # Tool buttons in two rows
         self.btn_add = ToolButton("Add")
         self.btn_erase = ToolButton("Erase")
         self.btn_lasso = ToolButton("Lasso")
@@ -443,12 +522,26 @@ class ToolsSection(QFrame):
             EditMode.REFINE: self.btn_refine,
         }
 
+        # Row 1: Add, Erase, Lasso
+        row1 = QHBoxLayout()
+        row1.setSpacing(2)
+        for btn in [self.btn_add, self.btn_erase, self.btn_lasso]:
+            row1.addWidget(btn)
+        layout.addLayout(row1)
+
+        # Row 2: Extend, Refine
+        row2 = QHBoxLayout()
+        row2.setSpacing(2)
+        for btn in [self.btn_extend, self.btn_refine]:
+            row2.addWidget(btn)
+        row2.addStretch()
+        layout.addLayout(row2)
+
         for mode, btn in self._mode_to_btn.items():
             self.button_group.addButton(btn)
             btn.clicked.connect(
                 lambda checked, m=mode: self._on_tool_clicked(m, checked)
             )
-            layout.addWidget(btn)
 
         # Connect to state
         self.state.edit_mode_changed.connect(self._on_edit_mode_changed)
@@ -639,12 +732,15 @@ class CandidateActionsSection(QFrame):
         self.state = state
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
 
         label = QLabel("Changes")
         label.setStyleSheet("color: #aaa; font-weight: bold;")
         layout.addWidget(label)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(4)
 
         self.btn_accept = QPushButton("Accept")
         self.btn_accept.setStyleSheet(
@@ -654,14 +750,14 @@ class CandidateActionsSection(QFrame):
                 border: 1px solid #5a7a5a;
                 border-radius: 4px;
                 color: #ddd;
-                padding: 8px;
+                padding: 6px;
             }
             QPushButton:hover { background-color: #4a6a4a; }
             QPushButton:disabled { background-color: #2a2a2a; color: #666; }
         """
         )
         self.btn_accept.clicked.connect(self._on_accept)
-        layout.addWidget(self.btn_accept)
+        btn_layout.addWidget(self.btn_accept)
 
         self.btn_reject = QPushButton("Reject")
         self.btn_reject.setStyleSheet(
@@ -671,14 +767,16 @@ class CandidateActionsSection(QFrame):
                 border: 1px solid #7a5a5a;
                 border-radius: 4px;
                 color: #ddd;
-                padding: 8px;
+                padding: 6px;
             }
             QPushButton:hover { background-color: #6a4a4a; }
             QPushButton:disabled { background-color: #2a2a2a; color: #666; }
         """
         )
         self.btn_reject.clicked.connect(self._on_reject)
-        layout.addWidget(self.btn_reject)
+        btn_layout.addWidget(self.btn_reject)
+
+        layout.addLayout(btn_layout)
 
         # Update button states
         self.state.candidate_changed.connect(self._update_buttons)
@@ -705,16 +803,19 @@ class ViewModeSection(QFrame):
         self.state = state
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
 
         label = QLabel("View")
         label.setStyleSheet("color: #aaa; font-weight: bold;")
         layout.addWidget(label)
 
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(2)
+
         self.btn_mean = ToolButton("Mean")
-        self.btn_corr = ToolButton("Correlation")
-        self.btn_local_corr = ToolButton("Local Corr")
+        self.btn_corr = ToolButton("Corr")
+        self.btn_local_corr = ToolButton("Local")
 
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
@@ -728,7 +829,9 @@ class ViewModeSection(QFrame):
             btn.clicked.connect(
                 lambda checked, m=mode: self._on_view_clicked(m, checked)
             )
-            layout.addWidget(btn)
+            btn_layout.addWidget(btn)
+
+        layout.addLayout(btn_layout)
 
         # Set initial state
         self.btn_mean.setChecked(True)
@@ -922,6 +1025,175 @@ class ROISelectorSection(QFrame):
         self.show_all_checkbox.blockSignals(False)
 
 
+class MainViewDetail(QFrame):
+    """Main view details: minimap, dynamic range, view mode, ROI selector."""
+
+    def __init__(self, state: AppState, parent=None):
+        super().__init__(parent)
+        self.state = state
+        self.setMinimumHeight(350)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # Minimap
+        minimap_label = QLabel("Overview")
+        minimap_label.setStyleSheet("color: #aaa; font-weight: bold;")
+        layout.addWidget(minimap_label)
+
+        self.minimap_widget = pg.GraphicsLayoutWidget()
+        self.minimap_widget.setFixedHeight(100)
+        self.minimap_widget.setBackground("#1a1a1a")
+        self.minimap_plot = self.minimap_widget.addPlot()
+        self.minimap_plot.hideAxis("left")
+        self.minimap_plot.hideAxis("bottom")
+        self.minimap_plot.setAspectLocked(True)
+        self.minimap_plot.setMouseEnabled(x=False, y=False)
+
+        self.minimap_image = pg.ImageItem()
+        self.minimap_plot.addItem(self.minimap_image)
+
+        # Viewport rectangle overlay
+        self.viewport_rect = pg.RectROI(
+            [0, 0], [10, 10],
+            pen=pg.mkPen("y", width=1),
+            movable=True,
+            resizable=False,
+        )
+        self.viewport_rect.removeHandle(0)  # Remove resize handles
+        self.minimap_plot.addItem(self.viewport_rect)
+        self.viewport_rect.sigRegionChanged.connect(self._on_viewport_rect_moved)
+
+        layout.addWidget(self.minimap_widget)
+
+        # Dynamic range controls
+        range_label = QLabel("Dynamic Range")
+        range_label.setStyleSheet("color: #aaa; font-weight: bold;")
+        layout.addWidget(range_label)
+
+        # Histogram widget
+        self.histogram = pg.HistogramLUTWidget()
+        self.histogram.setFixedHeight(80)
+        self.histogram.setBackground("#1a1a1a")
+        self.histogram.item.sigLevelsChanged.connect(self._on_levels_changed)
+        layout.addWidget(self.histogram)
+
+        # View mode section (reuse existing)
+        self.view_section = ViewModeSection(state)
+        layout.addWidget(self.view_section)
+
+        # ROI selector section (reuse existing)
+        self.roi_selector = ROISelectorSection(state)
+        layout.addWidget(self.roi_selector)
+
+        # Store reference to ImageView (set later)
+        self._image_view = None
+        self._updating_rect = False
+
+        # Per-view-mode dynamic range storage
+        self._levels_cache: dict[ViewMode, tuple] = {}
+        self._current_view_mode = state.view_mode
+
+        # Connect to state
+        self.state.image_changed.connect(self._on_image_changed)
+        self.state.view_mode_changed.connect(self._on_view_mode_changed)
+
+    def set_image_view(self, image_view: "ImageView"):
+        """Connect to main ImageView for viewport tracking."""
+        self._image_view = image_view
+        image_view.plot.vb.sigRangeChanged.connect(self._on_main_view_range_changed)
+        self._on_image_changed()
+
+    def _on_view_mode_changed(self, mode: ViewMode):
+        """Save current levels and restore cached levels for new mode."""
+        # Save current levels for previous mode
+        if hasattr(self, '_current_view_mode'):
+            try:
+                self._levels_cache[self._current_view_mode] = self.histogram.getLevels()
+            except:
+                pass
+        self._current_view_mode = mode
+
+    def _on_image_changed(self):
+        """Update minimap and histogram when image changes."""
+        image = self.state.current_image
+        if image is not None:
+            # Update the histogram without overwriting the levels cache
+            mode = self.state.view_mode
+            retained_levels = self._levels_cache.get(mode, None)
+
+            self.minimap_image.setImage(image.T)
+            self.minimap_plot.autoRange()
+            self.histogram.setImageItem(self.minimap_image)
+
+            if retained_levels is not None:
+                self._levels_cache[mode] = retained_levels
+
+            # Restore cached levels or autoscale
+            
+            if mode in self._levels_cache:
+                levels = self._levels_cache[mode]
+                self.histogram.setLevels(*levels)
+                self.histogram.setHistogramRange(levels[0], levels[1])
+            else:
+                # Autoscale to image range
+                mn, mx = float(image.min()), float(image.max())
+                self.histogram.setLevels(mn, mx)
+                self.histogram.setHistogramRange(mn, mx)
+
+            self._update_viewport_rect()
+
+    def _on_main_view_range_changed(self):
+        """Update viewport rect when main view pans/zooms."""
+        if self._updating_rect or self._image_view is None:
+            return
+        self._update_viewport_rect()
+
+    def _update_viewport_rect(self):
+        """Sync viewport rect to main view's visible range."""
+        if self._image_view is None:
+            return
+
+        self._updating_rect = True
+        vb = self._image_view.plot.vb
+        view_range = vb.viewRange()
+        x_min, x_max = view_range[0]
+        y_min, y_max = view_range[1]
+
+        self.viewport_rect.setPos([x_min, y_min])
+        self.viewport_rect.setSize([x_max - x_min, y_max - y_min])
+        self._updating_rect = False
+
+    def _on_viewport_rect_moved(self):
+        """Pan main view when viewport rect is dragged."""
+        if self._updating_rect or self._image_view is None:
+            return
+
+        self._updating_rect = True
+        pos = self.viewport_rect.pos()
+        size = self.viewport_rect.size()
+        center_x = pos.x() + size.x() / 2
+        center_y = pos.y() + size.y() / 2
+
+        vb = self._image_view.plot.vb
+        vb.setRange(
+            xRange=[pos.x(), pos.x() + size.x()],
+            yRange=[pos.y(), pos.y() + size.y()],
+            padding=0,
+        )
+        self._updating_rect = False
+
+    def _on_levels_changed(self):
+        """Update main image levels when histogram changes."""
+        if self._image_view is None:
+            return
+        levels = self.histogram.getLevels()
+        self._image_view.image_item.setLevels(levels)
+        # Cache levels for current view mode
+        self._levels_cache[self.state.view_mode] = levels
+
+
 class ROIDetailSection(QFrame):
     """ROI detail display: weight map and trace plot."""
 
@@ -951,12 +1223,18 @@ class ROIDetailSection(QFrame):
 
         # Trace plot
         self.trace_view = pg.PlotWidget()
-        self.trace_view.setFixedHeight(100)
+        self.trace_view.setFixedHeight(120)
         self.trace_view.setBackground("#1a1a1a")
-        self.trace_view.getPlotItem().hideAxis("bottom")
-        self.trace_view.getPlotItem().hideAxis("left")
+        # Show axes with tick numbers only (no labels)
+        plot_item = self.trace_view.getPlotItem()
+        plot_item.showAxis("bottom")
+        plot_item.showAxis("left")
+        plot_item.getAxis("bottom").setStyle(tickLength=-5, showValues=True)
+        plot_item.getAxis("left").setStyle(tickLength=-5, showValues=True)
+        plot_item.getAxis("left").setWidth(40)
+        plot_item.setContentsMargins(5, 5, 5, 5)
         # X-axis only mouse controls
-        self.trace_view.getPlotItem().getViewBox().setMouseEnabled(x=True, y=False)
+        plot_item.getViewBox().setMouseEnabled(x=True, y=False)
 
         # Trace lines
         self.trace_committed = self.trace_view.plot(pen=pg.mkPen("#ffffff", width=1))
@@ -966,7 +1244,7 @@ class ROIDetailSection(QFrame):
 
         layout.addWidget(self.trace_view)
 
-        # Toggle button
+        # Toggle buttons
         from PySide6.QtWidgets import QCheckBox
 
         self.simple_view_checkbox = QCheckBox("Hide proposal")
@@ -974,7 +1252,13 @@ class ROIDetailSection(QFrame):
         self.simple_view_checkbox.toggled.connect(self._on_simple_view_toggled)
         layout.addWidget(self.simple_view_checkbox)
 
+        self.show_fill_checkbox = QCheckBox("Show fill")
+        self.show_fill_checkbox.setStyleSheet("color: #ddd;")
+        self.show_fill_checkbox.toggled.connect(self._on_show_fill_toggled)
+        layout.addWidget(self.show_fill_checkbox)
+
         self._simple_view = False
+        self._image_view = None  # Set by MainWindow
 
         # Debounced update
         from .debounce import CallbackDebouncer
@@ -991,10 +1275,22 @@ class ROIDetailSection(QFrame):
     def _request_update(self):
         self._update_debouncer.request()
 
+    def set_image_view(self, image_view: "ImageView"):
+        """Store reference to ImageView for fill toggle."""
+        self._image_view = image_view
+
     def _on_simple_view_toggled(self, checked: bool):
         self._simple_view = checked
         self._update_trace_visibility()
         self._request_update()
+
+    def _on_show_fill_toggled(self, checked: bool):
+        if self._image_view is not None:
+            self._image_view.set_show_fills(checked)
+
+    def set_show_fill(self, show: bool):
+        """Programmatic fill toggle (for keyboard shortcut)."""
+        self.show_fill_checkbox.setChecked(show)
 
     def _update_trace_visibility(self):
         self.trace_candidate.setVisible(not self._simple_view)
@@ -1092,16 +1388,9 @@ class Sidebar(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ROI selector section
-        self.roi_selector = ROISelectorSection(state)
-        layout.addWidget(self.roi_selector)
-
-        # Separator
-        self._add_separator(layout)
-
-        # View mode section
-        self.view_section = ViewModeSection(state)
-        layout.addWidget(self.view_section)
+        # Main view detail panel (minimap, range, view mode, ROI selector)
+        self.main_view_detail = MainViewDetail(state)
+        layout.addWidget(self.main_view_detail)
 
         # Separator
         self._add_separator(layout)
@@ -1148,9 +1437,11 @@ class MainWindow(QMainWindow):
     def __init__(self, state: AppState, parent=None):
         super().__init__(parent)
         self.state = state
+        self._keybindings = DEFAULT_BINDINGS.copy()
 
         self.setWindowTitle("ROI Editor")
-        self.resize(1200, 800)
+        self.resize(1200, 1000)
+        self.setMinimumSize(800, 1000)
 
         # Central widget
         central = QWidget()
@@ -1166,3 +1457,71 @@ class MainWindow(QMainWindow):
         # Sidebar
         self.sidebar = Sidebar(state)
         layout.addWidget(self.sidebar)
+
+        # Wire up cross-component connections
+        self.sidebar.main_view_detail.set_image_view(self.image_view)
+        self.sidebar.roi_detail.set_image_view(self.image_view)
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts."""
+        key = event.key()
+        action = self._keybindings.get(key)
+
+        if action is None:
+            super().keyPressEvent(event)
+            return
+
+        # Tool actions
+        if action == "tool_add":
+            self.state.set_edit_mode(EditMode.ADD)
+        elif action == "tool_erase":
+            self.state.set_edit_mode(EditMode.ERASE)
+        elif action == "tool_lasso":
+            self.state.set_edit_mode(EditMode.LASSO)
+        elif action == "tool_extend":
+            self.state.set_edit_mode(EditMode.EXTEND)
+        elif action == "tool_refine":
+            self.state.set_edit_mode(EditMode.REFINE)
+        elif action == "tool_none":
+            self.state.set_edit_mode(EditMode.NONE)
+
+        # Accept/Reject
+        elif action == "accept":
+            self.state.accept_candidate()
+        elif action == "reject":
+            self.state.reject_candidate()
+
+        # View modes
+        elif action == "view_mean":
+            self.state.set_view_mode(ViewMode.MEAN)
+        elif action == "view_correlation":
+            self.state.set_view_mode(ViewMode.CORRELATION)
+        elif action == "view_local_correlation":
+            self.state.set_view_mode(ViewMode.LOCAL_CORRELATION)
+
+        # ROI management
+        elif action == "new_roi":
+            self.state.new_empty_roi()
+        elif action == "propose_roi":
+            self.sidebar.main_view_detail.roi_selector._on_propose_clicked()
+        elif action == "next_roi":
+            n = self.state.n_rois
+            if n > 0:
+                next_idx = (self.state.current_roi_index + 1) % n
+                self.state.set_current_roi_index(next_idx)
+
+        # Display toggles
+        elif action == "toggle_show_all":
+            self.state.set_show_all_rois(not self.state.show_all_rois)
+        elif action == "toggle_fill":
+            checkbox = self.sidebar.roi_detail.show_fill_checkbox
+            checkbox.setChecked(not checkbox.isChecked())
+
+        # Pen size
+        elif action == "pen_smaller":
+            self.state.set_pen_size(self.state.pen_size - 2)
+        elif action == "pen_larger":
+            self.state.set_pen_size(self.state.pen_size + 2)
+
+        else:
+            super().keyPressEvent(event)
