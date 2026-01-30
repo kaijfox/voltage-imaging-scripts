@@ -90,6 +90,7 @@ class TestConvolveSpatial:
 class TestAdd:
     def test_add_single_component(self, simple_video):
         """Adding a single component increases rank by 1"""
+        # New API: temporal (batch..., time, rank), spatial (batch..., rank, spatial...)
         temporal = np.random.randn(1000, 1)
         spatial = np.random.randn(1, 128, 128)
 
@@ -114,10 +115,11 @@ class TestAdd:
         # Check amplitude is preserved
         np.testing.assert_allclose(result.S[-3:], amplitude)
 
-    def test_add_with_n_filters(self, simple_video):
-        """Adding with n_filters broadcasts existing Vt"""
-        temporal = np.random.randn(1000, 3)
-        spatial = np.random.randn(3, 4, 128, 128)  # 4 filters
+    def test_add_with_batch_dims(self, simple_video):
+        """Adding with batch dims broadcasts existing Vt (new API: batch leading)"""
+        # New API: temporal (batch..., time, rank), spatial (batch..., rank, spatial...)
+        temporal = np.random.randn(1000, 3)  # no batch dims in temporal
+        spatial = np.random.randn(4, 3, 128, 128)  # batch=4, rank=3
 
         result = simple_video.add(temporal, spatial)
 
@@ -125,7 +127,7 @@ class TestAdd:
         assert result.S.shape == (53,)
         assert result.Vt.shape == (53, 4, 128, 128)
 
-        # Original components should be broadcast across n_filters dimension
+        # Original components should be broadcast across batch dimension
         np.testing.assert_allclose(result.Vt[0, 0], result.Vt[0, 1])
         np.testing.assert_allclose(result.Vt[0, 0], simple_video.Vt[0])
 
@@ -151,3 +153,139 @@ class TestAdd:
         result = simple_video.add(temporal, spatial)
 
         assert result.orthonormal is False
+
+
+class TestGain:
+    def test_temporal_gain_shape(self, simple_video):
+        """Temporal gain preserves shape"""
+        weights = np.random.randn(1000)
+        result = simple_video.gain(weights, dim='t')
+
+        assert result.U.shape == simple_video.U.shape
+        assert result.S.shape == simple_video.S.shape
+        assert result.Vt.shape == simple_video.Vt.shape
+
+    def test_temporal_gain_correctness(self):
+        """Temporal gain matches direct multiplication"""
+        np.random.seed(123)
+        arr = np.random.randn(5, 10)  # (component, time)
+        weights = np.random.randn(10)
+
+        result = SVDVideo.gain(arr, weights, dim='t')
+        expected = arr * weights[None, :]
+
+        np.testing.assert_allclose(result, expected)
+
+    def test_spatial_gain_shape(self, simple_video):
+        """Spatial gain preserves shape"""
+        weights = np.random.randn(128, 128)
+        result = simple_video.gain(weights, dim='spatial')
+
+        assert result.U.shape == simple_video.U.shape
+        assert result.S.shape == simple_video.S.shape
+        assert result.Vt.shape == simple_video.Vt.shape
+
+    def test_spatial_gain_correctness(self):
+        """Spatial gain matches direct multiplication"""
+        np.random.seed(123)
+        arr = np.random.randn(5, 8, 8)  # (component, spatial, spatial)
+        weights = np.random.randn(8, 8)
+
+        result = SVDVideo.gain(arr, weights, dim='spatial')
+        expected = arr * weights[None, :, :]
+
+        np.testing.assert_allclose(result, expected)
+
+    def test_gain_with_batch_dims(self):
+        """Gain with batch dimensions in weights"""
+        np.random.seed(123)
+        arr = np.random.randn(5, 10)  # (component, time)
+        weights = np.random.randn(3, 10)  # (batch=3, time)
+
+        result = SVDVideo.gain(arr, weights, dim='t')
+
+        assert result.shape == (5, 3, 10)  # (component, batch, time)
+
+        # Check correctness for each batch element
+        for b in range(3):
+            expected = arr * weights[b, :][None, :]
+            np.testing.assert_allclose(result[:, b, :], expected)
+
+    def test_gain_single_axis(self):
+        """Gain along single spatial axis"""
+        np.random.seed(123)
+        arr = np.random.randn(5, 8, 10)  # (component, dim1, dim2)
+        weights = np.random.randn(8)  # weights for axis 1 only
+
+        result = SVDVideo.gain(arr, weights, dim='spatial', axes=(1,))
+
+        assert result.shape == (5, 8, 10)
+        expected = arr * weights[None, :, None]
+        np.testing.assert_allclose(result, expected)
+
+
+class TestConvolveSeparable:
+    def test_temporal_separable_shape(self, simple_video):
+        """Temporal separable convolution preserves shape"""
+        filters = [np.ones(5) / 5]
+        result = simple_video.convolve_separable(filters, dim='t')
+
+        assert result.U.shape == simple_video.U.shape
+        assert result.S.shape == simple_video.S.shape
+        assert result.Vt.shape == simple_video.Vt.shape
+
+    def test_separable_matches_full_convolution(self):
+        """Separable convolution matches full convolution for separable kernel"""
+        np.random.seed(123)
+        arr = np.random.randn(3, 16, 16)  # (component, spatial, spatial)
+
+        # Create separable filters
+        filter_x = np.array([1, 2, 1]) / 4.0
+        filter_y = np.array([1, 2, 1]) / 4.0
+
+        # Separable convolution
+        result_sep = SVDVideo.convolve_separable(arr, [filter_x, filter_y], dim='spatial')
+
+        # Full convolution with outer product kernel
+        full_kernel = np.outer(filter_x, filter_y)
+        result_full = SVDVideo.convolve(arr, full_kernel, dim='spatial')
+
+        # Should match (within numerical precision)
+        np.testing.assert_allclose(result_sep, result_full, rtol=1e-10)
+
+    def test_separable_with_batch_dims(self):
+        """Separable convolution with batch dimensions"""
+        np.random.seed(123)
+        arr = np.random.randn(3, 16, 16)
+
+        # Filters with batch dimension
+        filter_x = np.random.randn(2, 3)  # (batch=2, kernel_size=3)
+        filter_y = np.random.randn(2, 3)
+
+        result = SVDVideo.convolve_separable(arr, [filter_x, filter_y], dim='spatial')
+
+        assert result.shape == (3, 2, 16, 16)  # (component, batch, spatial, spatial)
+
+    def test_separable_smoothing_reduces_variance(self, simple_video):
+        """Separable smoothing should reduce variance"""
+        filters = [np.ones(5) / 5, np.ones(5) / 5]
+        result = simple_video.convolve_separable(filters, dim='spatial')
+
+        orig_var = np.var(simple_video.Vt[0])
+        smooth_var = np.var(result.Vt[0])
+        assert smooth_var < orig_var
+
+    def test_separable_single_axis(self):
+        """Separable convolution along single axis"""
+        np.random.seed(123)
+        arr = np.random.randn(3, 16, 16)
+        filter_x = np.array([1, 2, 1]) / 4.0
+
+        result = SVDVideo.convolve_separable(arr, [filter_x], dim='spatial', axes=(1,))
+
+        assert result.shape == arr.shape
+
+        # Compare to 1D convolution using full convolve
+        from scipy.ndimage import convolve1d
+        expected = convolve1d(arr, filter_x, axis=1, mode='constant')
+        np.testing.assert_allclose(result, expected, rtol=1e-10)

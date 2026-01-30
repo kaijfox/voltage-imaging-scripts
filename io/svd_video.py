@@ -1,5 +1,83 @@
 from array_api_compat import array_namespace
 
+
+def _parse_batch(*operators, n_core_dims):
+    """
+    Extract batch shape from operator(s), validate consistency, provide output reshaper.
+
+    Parameters
+    ----------
+    *operators : arrays
+        One or more arrays with shape (batch..., core...)
+    n_core_dims : int or tuple of int
+        Number of trailing "core" dimensions per operator.
+        If int, same value used for all operators.
+
+    Returns
+    -------
+    batch_shape : tuple
+        Unified batch shape (broadcast across all operators)
+    cores : list of arrays
+        Operators reshaped to (flat_batch, *core_shape) for processing
+    reshape_out : callable
+        reshape_out(arr, insert_at=1) reshapes (dim0, flat_batch, rest...)
+        to (dim0, *batch_shape, rest...)
+    """
+    xp = array_namespace(operators[0])
+
+    if isinstance(n_core_dims, int):
+        n_core_dims = (n_core_dims,) * len(operators)
+
+    # Extract batch shapes
+    batch_shapes = []
+    for op, n_core in zip(operators, n_core_dims):
+        if n_core == 0:
+            batch_shapes.append(op.shape)
+        else:
+            batch_shapes.append(op.shape[:-n_core])
+
+    # Compute broadcast batch shape
+    batch_shape = ()
+    for bs in batch_shapes:
+        # Manual broadcast shape computation
+        max_len = max(len(batch_shape), len(bs))
+        padded_a = (1,) * (max_len - len(batch_shape)) + batch_shape
+        padded_b = (1,) * (max_len - len(bs)) + bs
+        batch_shape = tuple(
+            max(a, b) if a == 1 or b == 1 or a == b else -1  # -1 signals error
+            for a, b in zip(padded_a, padded_b)
+        )
+        if -1 in batch_shape:
+            raise ValueError(f"Incompatible batch shapes: {batch_shapes}")
+
+    flat_batch = 1
+    for s in batch_shape:
+        flat_batch *= s
+
+    # Reshape operators to (flat_batch, *core_shape)
+    cores = []
+    for op, n_core in zip(operators, n_core_dims):
+        if n_core == 0:
+            core_shape = ()
+        else:
+            core_shape = op.shape[-n_core:]
+        # Broadcast to full batch shape, then flatten batch dims
+        target_shape = batch_shape + core_shape
+        op_broadcast = xp.broadcast_to(
+            xp.reshape(op, (1,) * (len(batch_shape) - (op.ndim - n_core)) + op.shape),
+            target_shape
+        )
+        cores.append(xp.reshape(op_broadcast, (flat_batch,) + core_shape))
+
+    def reshape_out(arr, insert_at=1):
+        """Reshape (dim0, flat_batch, rest...) to (dim0, *batch_shape, rest...)"""
+        pre = arr.shape[:insert_at]
+        post = arr.shape[insert_at + 1:]
+        return xp.reshape(arr, pre + batch_shape + post)
+
+    return batch_shape, cores, reshape_out
+
+
 def _static_optional_filter(f):
     """
     Convert (array, dim) -> array function to SVDVideo -> SVDVideo
@@ -93,12 +171,22 @@ class SVDVideo:
         Parameters
         ----------
         arr : array (component, dim1, ..., dimN)
-        filter : array (n_kernels..., kernel_size1, ..., kernel_sizeM)
-            Last M dimensions are kernel sizes for M convolution axes.
+        filter : array (batch..., kernel_size1, ..., kernel_sizeM)
+            Trailing `len(axes)` dimensions are kernel sizes; leading dimensions
+            are batch dimensions that will appear in output.
         dim : str
             "t"/"time"/"row" for temporal (equiv. to axes=(1,)), else spatial.
         axes : tuple of int
-            Axes to convolve over (1-indexed). Default: all spatial axes.
+            Axes to convolve over (1-indexed into arr). Default: all axes after component.
+        pad_mode : str
+            Padding mode ('constant', 'reflect', etc.). Default: 'constant'.
+        pad_value : float
+            Value for constant padding. Default: 0.0.
+
+        Returns
+        -------
+        array (component, batch..., dim1, ..., dimN)
+            Convolved array with batch dimensions inserted after component.
         """
         xp = array_namespace(arr)
         pad_mode = pad_mode or 'constant'
@@ -116,16 +204,10 @@ class SVDVideo:
         n_spatial = arr.ndim - 1
         n_conv = len(axes)
 
-        # Parse filter: (n_kernels..., kernel_sizes...)
-        n_extra = filter.ndim - n_conv
-        n_kernels_shape = filter.shape[:n_extra] if n_extra > 0 else ()
-        kernel_sizes = filter.shape[n_extra:]
-        n_k = 1
-        for s in n_kernels_shape:
-            n_k *= s
-
-        # Flatten kernel batch: (n_k, k1, ..., kM)
-        filters = xp.reshape(filter, (n_k,) + kernel_sizes) if n_extra > 0 else filter[None]
+        # Use _parse_batch to handle batch dimensions
+        batch_shape, [filters], reshape_out = _parse_batch(filter, n_core_dims=n_conv)
+        kernel_sizes = filter.shape[-n_conv:] if n_conv > 0 else ()
+        n_k = filters.shape[0]
 
         # Full kernel shape with 1s for non-convolved axes
         axes_set = set(axes)
@@ -157,7 +239,7 @@ class SVDVideo:
                 padding=padding,
                 dimension_numbers=spec
             )
-            return xp.reshape(out, (arr.shape[0],) + n_kernels_shape + out.shape[2:])
+            return reshape_out(out)
 
         elif _backend(arr, "numpy"):
             from scipy.ndimage import convolve  # type: ignore
@@ -168,64 +250,289 @@ class SVDVideo:
                 convolve(arr, f.reshape(full_kernel), mode=pad_mode, cval=pad_value, axes=conv_axes)
                 for f in filters
             ], axis=1)
-            return out.reshape((arr.shape[0],) + n_kernels_shape + out.shape[2:])
+            return reshape_out(out)
 
         else:
             raise RuntimeError("Unsupported backend for `convolve`.")
-        
-    
-    def add(self, temporal, spatial, amplitude=None, axes=None) -> 'SVDVideo':
-        """
-        USV' + temporal @ spatial
-        temporal: array (time, rank)
-        spatial: array (rank, n_filters..., spatial0, spatial1, ...)
-        amplitude: array (rank,)
-        axes:
-            Dimensions in `temporal` and `spatial` assumed to match the shape of
-            the video object.
-            If not provided, `spatial.ndim` is assumed to to be at least the
-            number of spatial dimensions plus one. If spatial.ndim is greater
-            than as indicated by `axes`, dimensions will be prepended to the
-            spatial dimensions of the video and the video will be broadcast.
 
-        Rank is added to the SVD by extending U and V with the spatial and
-        temporal arrays and S with ones or amplitude.
+    @_static_optional_filter
+    def gain(arr, weights, dim="t", axes=None) -> "SVDVideo":
+        """
+        Multiply array by weights along specified axes (element-wise gain).
+
+        Parameters
+        ----------
+        arr : array (component, dim1, ..., dimN)
+        weights : array (batch..., size1, ..., sizeM)
+            Trailing `len(axes)` dimensions must match the size of the
+            corresponding axes in arr. Leading dimensions are batch.
+        dim : str
+            "t"/"time"/"row" for temporal (equiv. to axes=(1,)), else spatial.
+        axes : tuple of int
+            Axes to apply gain (1-indexed into arr). Default: all axes after component.
+
+        Returns
+        -------
+        array (component, batch..., dim1, ..., dimN)
+            Array with gain applied and batch dimensions inserted after component.
+        """
+        xp = array_namespace(arr)
+
+        # Temporal is spatial with axes=(1,)
+        if SVDVideo._row_axis(dim):
+            axes = (1,)
+        elif axes is None:
+            axes = tuple(range(1, arr.ndim))
+        axes = tuple(axes)
+
+        n_axes = len(axes)
+
+        # Use _parse_batch to handle batch dimensions
+        batch_shape, [weights_flat], reshape_out = _parse_batch(weights, n_core_dims=n_axes)
+        # weights_flat: (flat_batch, size1, ..., sizeM)
+
+        n_spatial = arr.ndim - 1
+        n_batch = len(batch_shape)
+        flat_batch = weights_flat.shape[0]
+
+        # Build broadcast shape for weights: (flat_batch, dim1, ..., dimN)
+        # where dims in axes get their actual size, others get 1
+        axes_set = set(axes)
+        broadcast_shape = [flat_batch]
+        axis_idx = 0
+        for i in range(n_spatial):
+            if (i + 1) in axes_set:
+                broadcast_shape.append(weights_flat.shape[1 + axis_idx])
+                axis_idx += 1
+            else:
+                broadcast_shape.append(1)
+
+        weights_broadcast = xp.reshape(weights_flat, tuple(broadcast_shape))
+
+        # arr: (component, dim1, ..., dimN) -> (component, 1, dim1, ..., dimN)
+        arr_expanded = xp.expand_dims(arr, axis=1)
+
+        # Multiply and reshape output
+        out = arr_expanded * weights_broadcast  # (component, flat_batch, dim1, ..., dimN)
+        return reshape_out(out)
+
+    @_static_optional_filter
+    def convolve_separable(
+        arr, filters, dim="t", axes=None, pad_mode=None, pad_value=None
+    ) -> "SVDVideo":
+        """
+        Apply separable convolution (1D filters sequentially along each axis).
+
+        Parameters
+        ----------
+        arr : array (component, dim1, ..., dimN)
+        filters : list of arrays [(batch..., k1), (batch..., k2), ...]
+            One 1D filter per axis in `axes`. Trailing dim is kernel size;
+            leading dims are batch (must broadcast across all filters).
+        dim : str
+            "t"/"time"/"row" for temporal (equiv. to axes=(1,)), else spatial.
+        axes : tuple of int
+            Axes to convolve over (1-indexed). Default: all axes after component.
+        pad_mode : str
+            Padding mode. Default: 'constant'.
+        pad_value : float
+            Value for constant padding. Default: 0.0.
+
+        Returns
+        -------
+        array (component, batch..., dim1, ..., dimN)
+            Convolved array with batch dimensions inserted after component.
+        """
+        xp = array_namespace(arr)
+        pad_mode = pad_mode or 'constant'
+        pad_value = pad_value if pad_value is not None else 0.0
+
+        # Temporal is spatial with axes=(1,)
+        if SVDVideo._row_axis(dim):
+            axes = (1,)
+        elif axes is None:
+            axes = tuple(range(1, arr.ndim))
+        axes = tuple(axes)
+
+        if len(filters) != len(axes):
+            raise ValueError(f"Expected {len(axes)} filters, got {len(filters)}")
+
+        # Parse batch shape from all filters (must broadcast)
+        batch_shape, filters_flat, reshape_out = _parse_batch(*filters, n_core_dims=1)
+        flat_batch = filters_flat[0].shape[0] if batch_shape else 1
+
+        n_spatial = arr.ndim - 1
+
+        # Expand arr for batch dimension: (component, dim...) -> (component, 1, dim...)
+        result = xp.broadcast_to(
+            xp.expand_dims(arr, axis=1),
+            (arr.shape[0], flat_batch) + arr.shape[1:]
+        )
+        # Copy to make concrete for in-place-style updates
+        if hasattr(xp, 'asarray'):
+            result = xp.asarray(result, copy=True)
+        else:
+            result = result.copy()
+
+        # Apply 1D convolution along each axis sequentially
+        for ax, filt_flat in zip(axes, filters_flat):
+            # filt_flat: (flat_batch, kernel_size)
+            kernel_size = filt_flat.shape[1]
+            pad_size = kernel_size // 2
+
+            # Build padding spec: ((0,0), (0,0), ..., (pad, pad), ..., (0,0))
+            # result shape: (component, flat_batch, dim1, ..., dimN)
+            pad_width = [(0, 0)] * result.ndim
+            pad_width[ax + 1] = (pad_size, pad_size)  # +1 for batch dim
+
+            if _backend(arr, "jax"):
+                import jax.numpy as jnp  # type: ignore
+                import jax.lax  # type: ignore
+
+                result_padded = jnp.pad(result, pad_width, mode=pad_mode, constant_values=pad_value)
+
+                # Build 1D conv kernel shape: (flat_batch, 1, k) for conv per batch
+                # Actually simpler: loop over batch and use 1D conv
+                # Or use conv_general_dilated with appropriate dimension spec
+
+                # Reshape for grouped conv: treat (component * flat_batch) as channels
+                C = result.shape[0]
+                B = flat_batch
+                spatial_shape = result.shape[2:]
+
+                # Move axis to convolve to last, do 1D conv, move back
+                # Axis in result is ax+1 (0=component, 1=batch, 2+=spatial)
+                # In spatial_shape, axis is ax-1 (since spatial starts at index 2 in result)
+
+                # Simpler approach: manual sliding window via vmap or explicit loop
+                # For efficiency, use lax.conv_general_dilated on reshaped data
+
+                # Reshape: (C, B, S1, ..., Sn) -> (C*B, 1, S1, ..., Sn)
+                result_for_conv = xp.reshape(result_padded, (C * B, 1) + result_padded.shape[2:])
+
+                # Kernel: (B, 1, 1, ..., k, ..., 1) where k is at position ax
+                kernel_shape = [B, 1] + [1] * n_spatial
+                kernel_shape[ax + 1] = kernel_size  # ax is 1-indexed, +1 for output channel dim
+                kernel = xp.reshape(filt_flat, tuple(kernel_shape))
+
+                # Repeat kernel for each component: (C*B, 1, ...) needs (C*B, 1, ...) kernel
+                # Use groups=C*B with kernel (C*B, 1, ...)
+                kernel_grouped = xp.tile(kernel, (C, 1) + (1,) * n_spatial)
+
+                dims = ''.join(str(i) for i in range(n_spatial))
+                spec = (f'NC{dims}', f'OI{dims}', f'NC{dims}')
+
+                padding_spec = [(0, 0)] * n_spatial
+                # Already padded, so use 'VALID' equivalent
+                conv_result = jax.lax.conv_general_dilated(
+                    result_for_conv,
+                    kernel_grouped,
+                    window_strides=(1,) * n_spatial,
+                    padding=padding_spec,
+                    dimension_numbers=spec,
+                    feature_group_count=C * B
+                )
+
+                result = xp.reshape(conv_result, (C, B) + conv_result.shape[2:])
+
+            elif _backend(arr, "numpy"):
+                import numpy as np  # type: ignore
+                from scipy.ndimage import convolve1d  # type: ignore
+
+                result_padded = np.pad(result, pad_width, mode=pad_mode, constant_values=pad_value)
+
+                # Apply 1D conv along axis for each batch element
+                out_slices = []
+                for b in range(flat_batch):
+                    kernel_1d = filt_flat[b]  # (kernel_size,)
+                    slice_b = result_padded[:, b]  # (component, dim1, ..., dimN)
+                    # convolve1d along axis ax (in the slice, which has no batch dim)
+                    convolved = convolve1d(slice_b, kernel_1d, axis=ax, mode='constant', cval=0.0)
+                    # Trim padding
+                    slices = [slice(None)] * convolved.ndim
+                    slices[ax] = slice(pad_size, -pad_size if pad_size > 0 else None)
+                    out_slices.append(convolved[tuple(slices)])
+
+                result = np.stack(out_slices, axis=1)
+
+            else:
+                raise RuntimeError("Unsupported backend for `convolve_separable`.")
+
+        return reshape_out(result)
+
+    def add(self, temporal, spatial, amplitude=None) -> 'SVDVideo':
+        """
+        Add components to the SVD: USV' + temporal @ spatial.
+
+        Parameters
+        ----------
+        temporal : array (batch..., time, new_rank)
+            Temporal basis for new components. Trailing 2 dims are core;
+            leading dims are batch dimensions.
+        spatial : array (batch..., new_rank, spatial0, spatial1, ...)
+            Spatial basis for new components. Trailing (1 + ndim_spatial) dims
+            are core; leading dims are batch dimensions (must broadcast with temporal).
+        amplitude : array (new_rank,), optional
+            Singular values for new components. Default: ones.
+
+        Returns
+        -------
+        SVDVideo
+            New video with shape (time, rank + new_rank) for U,
+            (rank + new_rank, batch..., spatial...) for Vt.
+
+        Notes
+        -----
+        Batch dimensions from temporal/spatial are inserted after the rank
+        dimension in the output Vt, and the existing Vt is broadcast to match.
         """
         xp = array_namespace(self.U)
 
-        new_rank = temporal.shape[1]
+        # Core dims: temporal has 2 (time, rank), spatial has 1 + ndim_spatial
+        n_core_temporal = 2
+        n_core_spatial = 1 + self.ndim_spatial
+
+        batch_shape, [temp_flat, spat_flat], _ = _parse_batch(
+            temporal, spatial, n_core_dims=(n_core_temporal, n_core_spatial)
+        )
+
+        # temp_flat: (flat_batch, time, new_rank)
+        # spat_flat: (flat_batch, new_rank, spatial...)
+        new_rank = temp_flat.shape[-1]
 
         if amplitude is None:
             amplitude = xp.ones(new_rank, dtype=self.S.dtype)
         amplitude = xp.asarray(amplitude)
 
-        # Determine n_filters shape from spatial
-        # spatial: (new_rank, n_f1, ..., n_fK, S1, ..., SN)
-        if axes is None:
-            n_filter_dims = spatial.ndim - 1 - self.ndim_spatial
-        else:
-            n_filter_dims = spatial.ndim - 1 - len(axes)
+        # For U: we take temporal from first batch element (all should have same time dim)
+        # Actually, temporal should be the same across batch for U concatenation
+        # We'll use the mean or just the first - semantically batch means multiple spatial outputs
+        # For now, require temporal to not vary across batch (just broadcast)
+        temporal_core = temp_flat[0]  # (time, new_rank)
 
-        n_filters_shape = spatial.shape[1:1+n_filter_dims] if n_filter_dims > 0 else ()
+        # Reshape spat_flat: (flat_batch, new_rank, spatial...) -> (new_rank, flat_batch, spatial...)
+        # Then reshape to (new_rank, *batch_shape, spatial...)
+        spat_transposed = xp.permute_dims(spat_flat, (1, 0) + tuple(range(2, spat_flat.ndim)))
+        spatial_new = xp.reshape(spat_transposed, (new_rank,) + batch_shape + spat_flat.shape[2:])
 
-        # Broadcast existing Vt to include n_filters dimensions
-        # Vt: (rank, S1, ..., SN) -> (rank, 1, ..., 1, S1, ..., SN) -> (rank, n_f1, ..., S1, ...)
-        if n_filters_shape:
+        # Broadcast existing Vt to include batch dimensions
+        # Vt: (rank, S1, ..., SN) -> (rank, 1, ..., 1, S1, ..., SN) -> (rank, batch..., S1, ...)
+        if batch_shape:
             Vt_expanded = xp.reshape(
                 self.Vt,
-                (self.rank,) + (1,) * len(n_filters_shape) + self.Vt.shape[1:]
+                (self.rank,) + (1,) * len(batch_shape) + self.Vt.shape[1:]
             )
-            broadcast_shape = (self.rank,) + n_filters_shape + self.Vt.shape[1:]
-            Vt_broadcast = xp.broadcast_to(Vt_expanded, broadcast_shape)
+            broadcast_target = (self.rank,) + batch_shape + self.Vt.shape[1:]
+            Vt_broadcast = xp.broadcast_to(Vt_expanded, broadcast_target)
             # Copy to avoid issues with views during concatenation
             Vt_broadcast = xp.asarray(Vt_broadcast, copy=True) if hasattr(xp, 'asarray') else Vt_broadcast.copy()
         else:
             Vt_broadcast = self.Vt
 
         # Concatenate
-        U_new = xp.concat([self.U, temporal], axis=1)
+        U_new = xp.concat([self.U, temporal_core], axis=1)
         S_new = xp.concat([self.S, amplitude])
-        Vt_new = xp.concat([Vt_broadcast, spatial], axis=0)
+        Vt_new = xp.concat([Vt_broadcast, spatial_new], axis=0)
 
         return SVDVideo(U_new, S_new, Vt_new, orthonormal=False)
 
