@@ -33,7 +33,6 @@ gui = [
 packages = [
     "imaging_scripts",
     "imaging_scripts.io",
-    "imaging_scripts.lab_scripts",
     "imaging_scripts.timeseries",
     "imaging_scripts.toy_data",
     "imaging_scripts.roigui"
