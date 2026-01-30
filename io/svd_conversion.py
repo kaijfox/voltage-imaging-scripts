@@ -7,6 +7,7 @@ import os
 import h5py
 import numpy as np
 from numpy.typing import NDArray
+import time
 import tqdm
 import argparse
 import sys
@@ -266,6 +267,10 @@ def _cli(argv):
         default=1,
         help="Number of iterations between checkpoints (passed to SRSVD).",
     )
+    parser.add_argument(
+        "--restart", type="store_true",
+        help="Delete extant output before converting"
+    )
 
     args = parser.parse_args(argv)
 
@@ -296,7 +301,6 @@ def _cli(argv):
     configure_logging("srsvd", args.verbose)
     configure_logging("converter", args.verbose)
 
-
     # Normalize paths
     input_path = str(Path(input_path))
     output_path = str(Path(output_path))
@@ -310,6 +314,12 @@ def _cli(argv):
     except:
         # Detect .raw video file
         input_type = 'raw'
+
+    # Optional force restart
+    if args.restart:
+        warning(f"Restarting svd at {output_path} in 5s")
+        time.sleep(5)
+        delete_svd(output_path)
 
     # Call stream_framereader
     try:
