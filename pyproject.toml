@@ -27,6 +27,8 @@ dev = [
 gui = [
     "pyside6",
     "pyqtgraph",
+    "napari",
+    "magicgui"
 ]
 
 [tool.setuptools]
@@ -35,7 +37,8 @@ packages = [
     "imaging_scripts.io",
     "imaging_scripts.timeseries",
     "imaging_scripts.toy_data",
-    "imaging_scripts.roigui"
+    "imaging_scripts.roigui",
+    "imaging_scripts.svd_view"
 ]
 
 [tool.setuptools.package-dir]
