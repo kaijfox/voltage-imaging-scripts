@@ -65,14 +65,14 @@ def _parse_batch(*operators, n_core_dims):
         target_shape = batch_shape + core_shape
         op_broadcast = xp.broadcast_to(
             xp.reshape(op, (1,) * (len(batch_shape) - (op.ndim - n_core)) + op.shape),
-            target_shape
+            target_shape,
         )
         cores.append(xp.reshape(op_broadcast, (flat_batch,) + core_shape))
 
     def reshape_out(arr, insert_at=1):
         """Reshape (dim0, flat_batch, rest...) to (dim0, *batch_shape, rest...)"""
         pre = arr.shape[:insert_at]
-        post = arr.shape[insert_at + 1:]
+        post = arr.shape[insert_at + 1 :]
         return xp.reshape(arr, pre + batch_shape + post)
 
     return batch_shape, cores, reshape_out
@@ -82,7 +82,8 @@ def _static_optional_filter(f):
     """
     Convert (array, dim) -> array function to SVDVideo -> SVDVideo
     """
-    def wrapped(bound, *a, dim = 't', **kw):
+
+    def wrapped(bound, *a, dim="t", **kw):
         # Called on an instance
         if isinstance(bound, SVDVideo):
             # Select U or V, or  as target
@@ -92,20 +93,20 @@ def _static_optional_filter(f):
                 target = bound.U.T
             else:
                 target = bound.Vt
-            
+
             # Call the actual filter
             filtered = f(target, *a, dim=dim, **kw)
-            
+
             # Return as a new SVD video
             if SVDVideo._row_axis(dim):
                 return SVDVideo(filtered.T, bound.S, bound.Vt)
             else:
                 return SVDVideo(bound.U, bound.S, filtered)
-        
+
         # Called on an array
         else:
             return f(bound, *a, dim=dim, **kw)
-    
+
     # Format decorator output properly
     wrapped.__name__ = f.__name__
     wrapped.__doc__ = f.__doc__
@@ -116,8 +117,7 @@ def _backend(arr, check_eq=None):
     if check_eq:
         return check_eq in str(type(arr).__module__)
     return str(type(arr).__module__)
-            
-        
+
 
 class SVDVideo:
 
@@ -160,7 +160,6 @@ class SVDVideo:
     def _row_axis(dim):
         return dim in ["t", "time", "row"]
 
-
     @_static_optional_filter
     def convolve(
         arr, filter, dim="t", axes=None, pad_mode=None, pad_value=None
@@ -189,7 +188,7 @@ class SVDVideo:
             Convolved array with batch dimensions inserted after component.
         """
         xp = array_namespace(arr)
-        pad_mode = pad_mode or 'constant'
+        pad_mode = pad_mode or "constant"
         pad_value = pad_value if pad_value is not None else 0.0
 
         # Temporal is spatial with axes=(1,)
@@ -212,14 +211,21 @@ class SVDVideo:
         # Full kernel shape with 1s for non-convolved axes
         axes_set = set(axes)
         full_kernel = tuple(
-            kernel_sizes[sum(1 for a in axes if a < i + 1)] if (i + 1) in axes_set else 1
+            (
+                kernel_sizes[sum(1 for a in axes if a < i + 1)]
+                if (i + 1) in axes_set
+                else 1
+            )
             for i in range(n_spatial)
         )
 
         # Padding per spatial dim
         padding = tuple(
-            (kernel_sizes[sum(1 for a in axes if a < i + 1)] // 2,) * 2
-            if (i + 1) in axes_set else (0, 0)
+            (
+                (kernel_sizes[sum(1 for a in axes if a < i + 1)] // 2,) * 2
+                if (i + 1) in axes_set
+                else (0, 0)
+            )
             for i in range(n_spatial)
         )
 
@@ -230,14 +236,15 @@ class SVDVideo:
             rhs = xp.reshape(filters, (n_k, 1) + full_kernel)
 
             # Dimension spec with digits for unlimited spatial dims
-            dims = ''.join(str(i) for i in range(n_spatial))
-            spec = (f'NC{dims}', f'OI{dims}', f'NC{dims}')
+            dims = "".join(str(i) for i in range(n_spatial))
+            spec = (f"NC{dims}", f"OI{dims}", f"NC{dims}")
 
             out = jax.lax.conv_general_dilated(
-                lhs, rhs,
+                lhs,
+                rhs,
                 window_strides=(1,) * n_spatial,
                 padding=padding,
-                dimension_numbers=spec
+                dimension_numbers=spec,
             )
             return reshape_out(out)
 
@@ -246,10 +253,19 @@ class SVDVideo:
             import numpy as np  # type: ignore
 
             conv_axes = tuple(range(1, arr.ndim))
-            out = np.stack([
-                convolve(arr, f.reshape(full_kernel), mode=pad_mode, cval=pad_value, axes=conv_axes)
-                for f in filters
-            ], axis=1)
+            out = np.stack(
+                [
+                    convolve(
+                        arr,
+                        f.reshape(full_kernel),
+                        mode=pad_mode,
+                        cval=pad_value,
+                        axes=conv_axes,
+                    )
+                    for f in filters
+                ],
+                axis=1,
+            )
             return reshape_out(out)
 
         else:
@@ -288,7 +304,9 @@ class SVDVideo:
         n_axes = len(axes)
 
         # Use _parse_batch to handle batch dimensions
-        batch_shape, [weights_flat], reshape_out = _parse_batch(weights, n_core_dims=n_axes)
+        batch_shape, [weights_flat], reshape_out = _parse_batch(
+            weights, n_core_dims=n_axes
+        )
         # weights_flat: (flat_batch, size1, ..., sizeM)
 
         n_spatial = arr.ndim - 1
@@ -313,7 +331,9 @@ class SVDVideo:
         arr_expanded = xp.expand_dims(arr, axis=1)
 
         # Multiply and reshape output
-        out = arr_expanded * weights_broadcast  # (component, flat_batch, dim1, ..., dimN)
+        out = (
+            arr_expanded * weights_broadcast
+        )  # (component, flat_batch, dim1, ..., dimN)
         return reshape_out(out)
 
     @_static_optional_filter
@@ -344,7 +364,7 @@ class SVDVideo:
             Convolved array with batch dimensions inserted after component.
         """
         xp = array_namespace(arr)
-        pad_mode = pad_mode or 'constant'
+        pad_mode = pad_mode or "constant"
         pad_value = pad_value if pad_value is not None else 0.0
 
         # Temporal is spatial with axes=(1,)
@@ -365,11 +385,10 @@ class SVDVideo:
 
         # Expand arr for batch dimension: (component, dim...) -> (component, 1, dim...)
         result = xp.broadcast_to(
-            xp.expand_dims(arr, axis=1),
-            (arr.shape[0], flat_batch) + arr.shape[1:]
+            xp.expand_dims(arr, axis=1), (arr.shape[0], flat_batch) + arr.shape[1:]
         )
         # Copy to make concrete for in-place-style updates
-        if hasattr(xp, 'asarray'):
+        if hasattr(xp, "asarray"):
             result = xp.asarray(result, copy=True)
         else:
             result = result.copy()
@@ -389,7 +408,9 @@ class SVDVideo:
                 import jax.numpy as jnp  # type: ignore
                 import jax.lax  # type: ignore
 
-                result_padded = jnp.pad(result, pad_width, mode=pad_mode, constant_values=pad_value)
+                result_padded = jnp.pad(
+                    result, pad_width, mode=pad_mode, constant_values=pad_value
+                )
 
                 # Build 1D conv kernel shape: (flat_batch, 1, k) for conv per batch
                 # Actually simpler: loop over batch and use 1D conv
@@ -408,19 +429,23 @@ class SVDVideo:
                 # For efficiency, use lax.conv_general_dilated on reshaped data
 
                 # Reshape: (C, B, S1, ..., Sn) -> (C*B, 1, S1, ..., Sn)
-                result_for_conv = xp.reshape(result_padded, (C * B, 1) + result_padded.shape[2:])
+                result_for_conv = xp.reshape(
+                    result_padded, (C * B, 1) + result_padded.shape[2:]
+                )
 
                 # Kernel: (B, 1, 1, ..., k, ..., 1) where k is at position ax
                 kernel_shape = [B, 1] + [1] * n_spatial
-                kernel_shape[ax + 1] = kernel_size  # ax is 1-indexed, +1 for output channel dim
+                kernel_shape[ax + 1] = (
+                    kernel_size  # ax is 1-indexed, +1 for output channel dim
+                )
                 kernel = xp.reshape(filt_flat, tuple(kernel_shape))
 
                 # Repeat kernel for each component: (C*B, 1, ...) needs (C*B, 1, ...) kernel
                 # Use groups=C*B with kernel (C*B, 1, ...)
                 kernel_grouped = xp.tile(kernel, (C, 1) + (1,) * n_spatial)
 
-                dims = ''.join(str(i) for i in range(n_spatial))
-                spec = (f'NC{dims}', f'OI{dims}', f'NC{dims}')
+                dims = "".join(str(i) for i in range(n_spatial))
+                spec = (f"NC{dims}", f"OI{dims}", f"NC{dims}")
 
                 padding_spec = [(0, 0)] * n_spatial
                 # Already padded, so use 'VALID' equivalent
@@ -430,7 +455,7 @@ class SVDVideo:
                     window_strides=(1,) * n_spatial,
                     padding=padding_spec,
                     dimension_numbers=spec,
-                    feature_group_count=C * B
+                    feature_group_count=C * B,
                 )
 
                 result = xp.reshape(conv_result, (C, B) + conv_result.shape[2:])
@@ -439,7 +464,9 @@ class SVDVideo:
                 import numpy as np  # type: ignore
                 from scipy.ndimage import convolve1d  # type: ignore
 
-                result_padded = np.pad(result, pad_width, mode=pad_mode, constant_values=pad_value)
+                result_padded = np.pad(
+                    result, pad_width, mode=pad_mode, constant_values=pad_value
+                )
 
                 # Apply 1D conv along axis for each batch element
                 out_slices = []
@@ -447,7 +474,9 @@ class SVDVideo:
                     kernel_1d = filt_flat[b]  # (kernel_size,)
                     slice_b = result_padded[:, b]  # (component, dim1, ..., dimN)
                     # convolve1d along axis ax (in the slice, which has no batch dim)
-                    convolved = convolve1d(slice_b, kernel_1d, axis=ax, mode='constant', cval=0.0)
+                    convolved = convolve1d(
+                        slice_b, kernel_1d, axis=ax, mode="constant", cval=0.0
+                    )
                     # Trim padding
                     slices = [slice(None)] * convolved.ndim
                     slices[ax] = slice(pad_size, -pad_size if pad_size > 0 else None)
@@ -460,7 +489,7 @@ class SVDVideo:
 
         return reshape_out(result)
 
-    def add(self, temporal, spatial, amplitude=None) -> 'SVDVideo':
+    def add(self, temporal, spatial, amplitude=None) -> "SVDVideo":
         """
         Add components to the SVD: USV' + temporal @ spatial.
 
@@ -512,20 +541,27 @@ class SVDVideo:
 
         # Reshape spat_flat: (flat_batch, new_rank, spatial...) -> (new_rank, flat_batch, spatial...)
         # Then reshape to (new_rank, *batch_shape, spatial...)
-        spat_transposed = xp.permute_dims(spat_flat, (1, 0) + tuple(range(2, spat_flat.ndim)))
-        spatial_new = xp.reshape(spat_transposed, (new_rank,) + batch_shape + spat_flat.shape[2:])
+        spat_transposed = xp.permute_dims(
+            spat_flat, (1, 0) + tuple(range(2, spat_flat.ndim))
+        )
+        spatial_new = xp.reshape(
+            spat_transposed, (new_rank,) + batch_shape + spat_flat.shape[2:]
+        )
 
         # Broadcast existing Vt to include batch dimensions
         # Vt: (rank, S1, ..., SN) -> (rank, 1, ..., 1, S1, ..., SN) -> (rank, batch..., S1, ...)
         if batch_shape:
             Vt_expanded = xp.reshape(
-                self.Vt,
-                (self.rank,) + (1,) * len(batch_shape) + self.Vt.shape[1:]
+                self.Vt, (self.rank,) + (1,) * len(batch_shape) + self.Vt.shape[1:]
             )
             broadcast_target = (self.rank,) + batch_shape + self.Vt.shape[1:]
             Vt_broadcast = xp.broadcast_to(Vt_expanded, broadcast_target)
             # Copy to avoid issues with views during concatenation
-            Vt_broadcast = xp.asarray(Vt_broadcast, copy=True) if hasattr(xp, 'asarray') else Vt_broadcast.copy()
+            Vt_broadcast = (
+                xp.asarray(Vt_broadcast, copy=True)
+                if hasattr(xp, "asarray")
+                else Vt_broadcast.copy()
+            )
         else:
             Vt_broadcast = self.Vt
 
@@ -536,29 +572,29 @@ class SVDVideo:
 
         return SVDVideo(U_new, S_new, Vt_new, orthonormal=False)
 
-
-        
-        
-
     @staticmethod
-    def orthogonal(S, F, Gt,):
+    def orthogonal(
+        S,
+        F,
+        Gt,
+    ):
         """
         Compute orthogonal bases after applying linear filters
 
         For filters X, Y', form decomposed X A Y' from A = U S Vt
         and from the filtered components F = XU, G' = V'Y'
         """
-        if _backend(S, 'numpy'):
-            from scipy import linalg #type: ignore
-            import numpy as np #type: ignore
-        elif _backend(S, 'jax'):
-            from jax.scipy import linalg #type: ignore
-            import jax.numpy as np #type: ignore
-            
+        if _backend(S, "numpy"):
+            from scipy import linalg  # type: ignore
+            import numpy as np  # type: ignore
+        elif _backend(S, "jax"):
+            from jax.scipy import linalg  # type: ignore
+            import jax.numpy as np  # type: ignore
+
         # 2. Gramian Eigendecomposition (O(Mr^2 + r^3))
         sf2, Qf = linalg.eigh(F.T @ F)
         sg2, Qg = linalg.eigh(Gt @ Gt.T)
-        
+
         sf = np.sqrt(np.maximum(sf2, 0))
         sg = np.sqrt(np.maximum(sg2, 0))
 
@@ -574,11 +610,6 @@ class SVDVideo:
         Vt_filt = (Vt_hat @ Qg.T / sg[:, None]) @ Gt.T
 
         return U_filt, S_filt, Vt_filt
-
-
-
-
-        
 
 
 # Make compatible with jitting
