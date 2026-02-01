@@ -1,6 +1,6 @@
 from .FrameReader import FrameReader
 from .svd import SRSVD
-from .cli_tools import configure_logging, enable_logging
+from ..cli.common import configure_logging
 
 from pathlib import Path
 import os
@@ -9,9 +9,9 @@ import numpy as np
 from numpy.typing import NDArray
 import time
 import tqdm
-import click
 
-logger, (error, warning, info, debug) = configure_logging("converter", 2)
+
+logger, (error, warning, info, debug) = configure_logging("converter")
 
 
 def _first_pass_complete(svd):
@@ -223,19 +223,7 @@ def array_to_svd(
         )
 
 
-def _parse_slice(s):
-    """Parse a string like '0:100' or '-100:' into a slice object."""
-    if s is None:
-        return slice(None)
-    parts = s.split(":")
-    if len(parts) == 1:
-        # Single index
-        idx = int(parts[0])
-        return slice(idx, idx + 1)
-    start = int(parts[0]) if parts[0] else None
-    stop = int(parts[1]) if len(parts) > 1 and parts[1] else None
-    step = int(parts[2]) if len(parts) > 2 and parts[2] else None
-    return slice(start, stop, step)
+
 
 
 def _slice_indices(s, size):
@@ -382,224 +370,3 @@ def slice_svd_file(
         dst.attrs["n_inner"] = int(np.prod(dst["Vh"].shape[1:]))
 
 
-@click.group()
-@click.option(
-    "-v", "--verbose", count=True, help="Increase verbosity (use -v, -vv, -vvv)"
-)
-def cli(verbose):
-    """SVD conversion and slicing tools."""
-    if verbose > 3:
-        raise click.BadParameter("Verbose level must be 0-3")
-    enable_logging(verbose)
-    configure_logging("srsvd", verbose)
-    configure_logging("converter", verbose)
-
-
-@cli.command()
-@click.option(
-    "-i",
-    "--input",
-    "input_path",
-    required=True,
-    type=click.Path(exists=True),
-    help="Path to input video/source.",
-)
-@click.option(
-    "-o",
-    "--output",
-    "output_path",
-    required=True,
-    type=click.Path(),
-    help="Output file path.",
-)
-@click.option(
-    "-b",
-    "--batch-size",
-    type=int,
-    default=1000,
-    help="Number of frames to read per batch (default: 1000).",
-)
-@click.option(
-    "-r", "--rank", type=int, required=True, help="Target rank (n_rand_col) for SRSVD."
-)
-@click.option(
-    "-rs",
-    "--rank-spatial",
-    type=int,
-    default=None,
-    help="Row space reconstruction rank (n_rand_row) if different from row rank.",
-)
-@click.option(
-    "--no-second-pass",
-    is_flag=True,
-    help="Disable the second pass; only perform the first pass.",
-)
-@click.option("--seed", type=int, default=None, help="Random seed for reproducibility.")
-@click.option(
-    "--checkpoint-every",
-    type=int,
-    default=1,
-    help="Number of iterations between checkpoints.",
-)
-@click.option("--restart", is_flag=True, help="Delete extant output before converting.")
-@click.option("--no-progress", is_flag=True, help="Disable tqdm progress bars.")
-def convert(
-    input_path,
-    output_path,
-    batch_size,
-    rank,
-    rank_spatial,
-    no_second_pass,
-    seed,
-    checkpoint_every,
-    restart,
-    no_progress,
-):
-    """Convert video to SVD format."""
-    # Validation
-    if batch_size <= 0:
-        raise click.BadParameter("--batch-size must be > 0")
-    if rank <= 0:
-        raise click.BadParameter("--rank must be > 0")
-    if rank_spatial is not None and rank_spatial <= 0:
-        raise click.BadParameter("--rank-spatial must be > 0 if provided")
-    if checkpoint_every <= 0:
-        raise click.BadParameter("--checkpoint-every must be > 0")
-
-    second_pass = not no_second_pass
-    progress = not no_progress
-
-    # Normalize paths
-    input_path = str(Path(input_path))
-    output_path = str(Path(output_path))
-
-    # Check input type
-    try:
-        with h5py.File(input_path, "r") as f:
-            if "video" in f:
-                input_type = "raw_h5"
-    except:
-        input_type = "raw"
-
-    # Optional force restart
-    if restart:
-        warning(f"Restarting svd at {output_path} in 5s")
-        time.sleep(5)
-        delete_svd(output_path)
-
-    # Run conversion
-    try:
-        if input_type == "raw":
-            result = stream_framereader(
-                input_path=input_path,
-                output_path=output_path,
-                batch_size=batch_size,
-                rank=rank,
-                rank_spatial=rank_spatial,
-                second_pass=second_pass,
-                seed=seed,
-                checkpoint_every=checkpoint_every,
-                progress=progress,
-            )
-        elif input_type == "raw_h5":
-            result = stream_h5(
-                input_path=input_path,
-                output_path=output_path,
-                batch_size=batch_size,
-                rank=rank,
-                seed=seed,
-                checkpoint_every=checkpoint_every,
-                progress=progress,
-            )
-    except Exception as exc:
-        error(f"Conversion failed: {exc}")
-        raise
-
-    return result
-
-
-@cli.command("slice")
-@click.option(
-    "-i",
-    "--input",
-    "input_path",
-    required=True,
-    type=click.Path(exists=True),
-    help="Path to input SVD file.",
-)
-@click.option(
-    "-o",
-    "--output",
-    "output_path",
-    required=True,
-    type=click.Path(),
-    help="Output file path.",
-)
-@click.option(
-    "--temporal",
-    type=str,
-    default=None,
-    help='Temporal slice, e.g. "0:100" or "-100:".',
-)
-@click.option(
-    "--spatial",
-    type=str,
-    default=None,
-    multiple=True,
-    help='Spatial slice(s), e.g. --spatial "10:50" --spatial "20:60".',
-)
-@click.option(
-    "--component", type=str, default=None, help='Component/rank slice, e.g. "0:10".'
-)
-@click.option(
-    "-b",
-    "--batch-size",
-    type=int,
-    default=None,
-    help="Batch size for streaming. If not set, loads full arrays.",
-)
-@click.option(
-    "--stream-dim",
-    type=int,
-    default=0,
-    help="Dimension to stream over for U (0=temporal, 1=component).",
-)
-@click.option(
-    "--stream-dim-spatial",
-    type=int,
-    default=None,
-    help="Dimension to stream over for Vh. Defaults to --stream-dim.",
-)
-@click.option("--no-progress", is_flag=True, help="Disable tqdm progress bars.")
-def slice_cmd(
-    input_path,
-    output_path,
-    temporal,
-    spatial,
-    component,
-    batch_size,
-    stream_dim,
-    stream_dim_spatial,
-    no_progress,
-):
-    """Slice an existing SVD file."""
-    # Parse slice strings
-    temporal_slice = _parse_slice(temporal)
-    component_slice = _parse_slice(component)
-    spatial_slices = tuple(_parse_slice(s) for s in spatial) if spatial else ()
-
-    slice_svd_file(
-        input_path=input_path,
-        output_path=output_path,
-        temporal=temporal_slice,
-        spatial=spatial_slices,
-        component=component_slice,
-        batch_size=batch_size,
-        stream_dim=stream_dim,
-        stream_dim_spatial=stream_dim_spatial,
-        progress=not no_progress,
-    )
-
-
-if __name__ == "__main__":
-    cli()

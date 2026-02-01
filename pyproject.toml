@@ -34,12 +34,16 @@ gui = [
 [tool.setuptools]
 packages = [
     "imaging_scripts",
+    "imaging_scripts.cli",
     "imaging_scripts.io",
     "imaging_scripts.timeseries",
     "imaging_scripts.toy_data",
     "imaging_scripts.roigui",
     "imaging_scripts.svd_view"
 ]
+
+[project.scripts]
+imaging_script = "imaging_scripts.cli.run:cli"
 
 [tool.setuptools.package-dir]
 imaging_scripts = "."

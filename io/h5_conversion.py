@@ -1,9 +1,5 @@
 from .FrameReader import FrameReader
-from .svd_conversion import (
-    add_stream_conversion_args,
-    configure_logging,
-    enable_logging,
-)
+from ..cli.common import configure_logging
 
 import os
 import h5py
@@ -13,7 +9,7 @@ import numpy as np
 import argparse
 import sys
 
-logger, (error, warning, info, debug) = configure_logging("converter", 2)
+logger, (error, warning, info, debug) = configure_logging("converter")
 
 
 def stream_framereader(
@@ -32,12 +28,13 @@ def stream_framereader(
     with h5py.File(output_path, "w") as f:
         f.create_dataset(
             "video",
-            (reader.max_frames, reader.h, reader.w),
+            (reader.max_frames - start, reader.h, reader.w),
             dtype=np.dtype(reader.dtype),
         )
-        f.attrs["frames"] = reader.max_frames
+        f.attrs["frames"] = reader.max_frames - start
         f.attrs["width"] = reader.w
         f.attrs["height"] = reader.h
+        f.attrs["reference_frame_start"] = start
 
         # Set up optional progress indicator
         if progress:
@@ -48,62 +45,11 @@ def stream_framereader(
         # Write batches of frames to the movie archive
         for i in iterator:
             end_frame = min(i + batch_size, reader.max_frames)
+            debug(f"Loading frames [{i+1}, {end_frame}]")
             frames = reader.get_frames_by_indexes(i + 1, end_frame)
-            f["video"][i : i + batch_size, :, :] = frames.transpose(2, 0, 1)
-
-
-def _cli(argv):
-
-    parser = argparse.ArgumentParser(
-        prog="stream_svd", description="Stream RAW video frames to HDF5 store."
-    )
-
-    # Mode + paths
-    add_stream_conversion_args(parser)
-
-    # Manual resume
-    parser.add_argument(
-        "--start",
-        type=int,
-        default=0,
-        help="Resume conversion some number of frames into the video.",
-    )
-
-    args = parser.parse_args(argv)
-
-    input_path = args.input
-    output_path = args.output
-    batch_size = args.batch_size
-    progress = not args.no_progress
-    start = args.start
-
-    # Basic validation
-    if batch_size <= 0:
-        parser.error("--batch-size must be > 0")
-    if args.verbose > 3:
-        parser.errror("Verbose level must be 0-3")
-
-    # Set up logging
-    enable_logging(args.verbose)
-    configure_logging("srsvd", args.verbose)
-    configure_logging("converter", args.verbose)
-
-    # Call stream_framereader
-    try:
-        result = stream_framereader(
-            input_path=input_path,
-            output_path=str(output_path),
-            batch_size=batch_size,
-            progress=progress,
-            start=start,
-        )
-    except Exception as exc:
-        # surface a useful message and re-raise to keep traceback if running from CLI
-        error(f"stream_framereader failed: {exc}")
-        raise
-
-    return result
-
-
-if __name__ == "__main__":
-    _cli(sys.argv[1:])
+            frames = frames.transpose(2, 0, 1)
+            
+            vid_start = i - start
+            vid_end = vid_start + len(frames)
+            debug(f"Writing {frames.shape} -> [{vid_start}, {vid_end}]")
+            f["video"][vid_start : vid_end] = frames

@@ -1,11 +1,11 @@
-from .cli_tools import configure_logging
+from ..cli.common import configure_logging
 
 import os
 import numpy as np
 import h5py
 from contextlib import contextmanager
 
-logger, (error, warn, info, debug) = configure_logging("srsvd", 2)
+logger, (error, warn, info, debug) = configure_logging("srsvd")
 
 
 class SRSVD:
@@ -205,6 +205,7 @@ class SRSVD:
                             self._main.create_dataset(name, data=arr)
                         else:
                             self._main.create_dataset(name, data=arr, chunks=True)
+                        self._main.attrs["orthogonal"] = True
 
                 # Metadata
                 self._main.attrs["n_rows"] = self.n_rows
@@ -349,6 +350,9 @@ class SRSVD:
                         self._main.create_dataset(name, data=arr)
                     else:
                         self._main.create_dataset(name, data=arr, chunks=True)
+                    
+                    # SVD video files not required to be othonormal
+                    self._main.attrs["orthogonal"] = True
 
                 # Success cleanup
                 self._main.flush()

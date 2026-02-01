@@ -1,5 +1,6 @@
 from array_api_compat import array_namespace
-
+from pathlib import Path
+import os
 
 def _parse_batch(*operators, n_core_dims):
     """
@@ -122,7 +123,22 @@ def _backend(arr, check_eq=None):
 class SVDVideo:
 
     def __init__(self, U, S, Vt, orthonormal=False):
+        """
+        SVD representation of a video: U @ diag(S) @ Vt.
 
+        Parameters
+        ----------
+        U : array (time, rank)
+            Temporal basis vectors.
+        S : array (rank,)
+            Singular values.
+        Vt : array (rank, spatial...)
+            Spatial basis vectors (can have arbitrary spatial dimensions).
+        orthonormal : bool
+            If True, U and Vt are orthonormal bases (U.T @ U = I, Vt @ Vt.T = I).
+            This is a metadata flag for downstream operations that may require
+            or benefit from orthonormality (e.g., avoiding reorthogonalization).
+        """
         xp = array_namespace(U)
         self.U = U
         self.S = xp.asarray(S)
@@ -139,17 +155,80 @@ class SVDVideo:
         self.rank = self.S.shape[0]
         self.ndim_spatial = self.Vt.ndim - 1
 
-    def __getitem__(self, *idx):
+    @classmethod
+    def load(cls, path: os.PathLike, backend=None):
+        """
+        Load SVDVideo from HDF5 file.
+
+        Parameters
+        ----------
+        path : path-like
+            Path to HDF5 file containing U, S, Vh datasets.
+        backend : str, optional
+            Array backend for loaded data. Options: None (numpy), "jax".
+
+        Returns
+        -------
+        SVDVideo
+        """
+        import h5py
+
+        path = str(Path(path))
+        with h5py.File(path, 'r') as f:
+            U = f['U'][:]
+            S = f['S'][:]
+            Vh = f['Vh'][:]
+            orthonormal = f.attrs.get("orthonormal", False)
+
+        if backend == "jax":
+            import jax.numpy as jnp #type: ignore
+            U, S, Vh = jnp.asarray(U), jnp.asarray(S), jnp.asarray(Vh)
+
+        return cls(U, S, Vh, orthonormal=orthonormal)
+        
+    def save(self, path: os.PathLike):
+        """
+        Save SVDVideo to HDF5 file.
+
+        Parameters
+        ----------
+        path : path-like
+            Output path. Creates file with U, S, Vh datasets and metadata
+            attributes (orthonormal, n_rows, n_inner, dtype).
+        """
+        import h5py
+        import numpy as np
+
+        path = str(Path(path))
+
+        # Convert to numpy if needed (e.g., from JAX)
+        U = np.asarray(self.U)
+        S = np.asarray(self.S)
+        Vh = np.asarray(self.Vt)
+
+        with h5py.File(path, 'w') as f:
+            f.create_dataset('U', data=U)
+            f.create_dataset('S', data=S)
+            f.create_dataset('Vh', data=Vh)
+            f.attrs['orthonormal'] = self.orthonormal
+            f.attrs['n_rows'] = U.shape[0]
+            f.attrs['n_inner'] = int(np.prod(Vh.shape[1:]))
+            f.attrs['dtype'] = str(U.dtype)
+
+    def __getitem__(self, idx):
         time_idx, spatial_idx = idx[0], idx[1:]
+        print(time_idx, spatial_idx)
         Usel = self.U[time_idx]
         Vsel = self.Vt[:, *spatial_idx]
 
+        print(f"Usel {Usel.shape} Vsel {Vsel.shape}")
         if Usel.ndim == 1:
             Uscaled = Usel * self.S
             reconst = (Vsel.T @ Uscaled[None].T).T[0]
         else:
             Uscaled = Usel * self.S[None, :]
-            reconst = (Vsel.T @ Uscaled.T).T[0]
+            print(f"Uscaled {Uscaled.shape}")
+            reconst = (Vsel.T @ Uscaled.T).T
 
         return reconst
 
@@ -178,7 +257,10 @@ class SVDVideo:
         axes : tuple of int
             Axes to convolve over (1-indexed into arr). Default: all axes after component.
         pad_mode : str
-            Padding mode ('constant', 'reflect', etc.). Default: 'constant'.
+            Padding mode. Default: 'constant'.
+            For numpy backend, supported values are as for
+            `scipy.ndimage.convolve`, `reflect`, `constant`, `nearest`,
+            `mirror`, `wrap`. For jax backend, only constant zero paddding is used.
         pad_value : float
             Value for constant padding. Default: 0.0.
 
@@ -224,7 +306,7 @@ class SVDVideo:
             (
                 (kernel_sizes[sum(1 for a in axes if a < i + 1)] // 2,) * 2
                 if (i + 1) in axes_set
-                else (0, 0)
+                else (0, 0) 
             )
             for i in range(n_spatial)
         )
@@ -579,10 +661,32 @@ class SVDVideo:
         Gt,
     ):
         """
-        Compute orthogonal bases after applying linear filters
+        Reorthogonalize SVD after applying linear filters.
 
-        For filters X, Y', form decomposed X A Y' from A = U S Vt
-        and from the filtered components F = XU, G' = V'Y'
+        Given original SVD A = U @ diag(S) @ Vt and linear filters X (temporal)
+        and Y' (spatial), computes orthonormal SVD of X @ A @ Y' from the
+        pre-filtered components F = X @ U and Gt = Vt @ Y'.
+
+        Uses Gramian eigendecomposition for efficiency: O(r^3) where r is rank,
+        rather than O(T*M) for full recomputation.
+
+        Parameters
+        ----------
+        S : array (rank,)
+            Original singular values.
+        F : array (time, rank)
+            Filtered temporal basis (X @ U).
+        Gt : array (rank, spatial...)
+            Filtered spatial basis (Vt @ Y', can have arbitrary spatial dims).
+
+        Returns
+        -------
+        U_new : array (time, rank)
+            Orthonormal temporal basis.
+        S_new : array (rank,)
+            New singular values.
+        Vt_new : array (rank, spatial_flat)
+            Orthonormal spatial basis (flattened spatial dimensions).
         """
         if _backend(S, "numpy"):
             from scipy import linalg  # type: ignore
@@ -593,7 +697,8 @@ class SVDVideo:
 
         # 2. Gramian Eigendecomposition (O(Mr^2 + r^3))
         sf2, Qf = linalg.eigh(F.T @ F)
-        sg2, Qg = linalg.eigh(Gt @ Gt.T)
+        Gt_flat = Gt.reshape(Gt.shape[0], -1)
+        sg2, Qg = linalg.eigh(Gt_flat @ Gt_flat.T)
 
         sf = np.sqrt(np.maximum(sf2, 0))
         sg = np.sqrt(np.maximum(sg2, 0))
@@ -607,8 +712,10 @@ class SVDVideo:
         # U_filt = F @ (Qf @ Sf^-1) @ U_hat
         U_filt = (F @ Qf / sf) @ U_hat
         # V_filt' = Vt_hat @ (Sg^-1 @ Qg') @ G
-        Vt_filt = (Vt_hat @ Qg.T / sg[:, None]) @ Gt.T
+        Vt_filt = (Vt_hat @ Qg.T / sg[:, None]) @ Gt_flat
 
+        # Unflatten and return
+        Vt_filt = Vt_filt.reshape(Vt_filt.shape[0], *Gt.shape[1:])
         return U_filt, S_filt, Vt_filt
 
 
