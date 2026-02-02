@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import argparse
 import sys
+from contextlib import nullcontext
 
 logger, (error, warning, info, debug) = configure_logging("converter")
 
@@ -26,16 +27,15 @@ def stream_framereader(
 
     # Initialize hdf5 file and video datset
     with h5py.File(output_path, "w") as f:
-        f.create_dataset(
-            "video",
-            (reader.max_frames - start, reader.h, reader.w),
+        create_h5_video(
+            f,
+            frames=reader.max_frames - start,
+            width=reader.w,
+            height=reader.h,
             dtype=np.dtype(reader.dtype),
+            reference_frame_start=start,
         )
-        f.attrs["frames"] = reader.max_frames - start
-        f.attrs["width"] = reader.w
-        f.attrs["height"] = reader.h
-        f.attrs["reference_frame_start"] = start
-
+        
         # Set up optional progress indicator
         if progress:
             iterator = tqdm.trange(start, reader.max_frames, batch_size)
@@ -48,8 +48,24 @@ def stream_framereader(
             debug(f"Loading frames [{i+1}, {end_frame}]")
             frames = reader.get_frames_by_indexes(i + 1, end_frame)
             frames = frames.transpose(2, 0, 1)
-            
+
             vid_start = i - start
             vid_end = vid_start + len(frames)
             debug(f"Writing {frames.shape} -> [{vid_start}, {vid_end}]")
-            f["video"][vid_start : vid_end] = frames
+            f["video"][vid_start:vid_end] = frames
+
+
+def create_h5_video(path, frames, width, height, reference_frame_start, dtype):
+    """Create blank H5 video file."""
+    # Apply to an open hdf5 file
+    if isinstance(path, h5py.File):
+        f = path
+        f.create_dataset("video", (frames, height, width), dtype=dtype)
+        f.attrs["frames"] = frames
+        f.attrs["width"] = width
+        f.attrs["height"] = height
+        f.attrs["reference_frame_start"] = reference_frame_start
+    # Create and open, then apply
+    else:
+        with h5py.File(path, "w") as f:
+            create_h5_video(f, frames, width, height, reference_frame_start, dtype)

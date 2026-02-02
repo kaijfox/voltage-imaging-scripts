@@ -9,6 +9,9 @@ import h5py
 
 from .types import Traces
 from .rois import ROI, ROICollection
+from ..cli.common import configure_logging
+
+logger, (error, warning, info, debug) = configure_logging("extract")
 
 
 def extract_traces(
@@ -23,6 +26,8 @@ def extract_traces(
     ids=None,
     fs=None,
     batch_size=None,
+    ols=True,
+    weighted=True,
 ):
     """
     Extract ROI traces from video source.
@@ -55,6 +60,12 @@ def extract_traces(
         Sampling rate in Hz.
     batch_size : int, optional
         Batch size for streaming extraction. Required for H5 movie sources.
+    ols : bool, default True
+        If True, use OLS regression to unmix ROI signals from background.
+        If False, use simple weighted summation (still performs neuropil subtraction).
+    weighted : bool, default True
+        If True, use ROI weights from the collection.
+        If False, use uniform weights normalized by L2 norm.
 
     Returns
     -------
@@ -81,6 +92,8 @@ def extract_traces(
             normalize=normalize,
             bg_smooth_size=bg_smooth_size,
             exclusion_threshold=exclusion_threshold,
+            ols=ols,
+            weighted=weighted,
         )
     elif isinstance(source, (str, Path)):
         source_path = Path(source)
@@ -102,6 +115,8 @@ def extract_traces(
                 normalize=normalize,
                 bg_smooth_size=bg_smooth_size,
                 exclusion_threshold=exclusion_threshold,
+                ols=ols,
+                weighted=weighted,
             )
         elif has_video:
             # Streaming extraction from raw video
@@ -114,6 +129,8 @@ def extract_traces(
                 normalize=normalize,
                 bg_smooth_size=bg_smooth_size,
                 exclusion_threshold=exclusion_threshold,
+                ols=ols,
+                weighted=weighted,
             )
         else:
             raise ValueError(
@@ -181,6 +198,8 @@ def extract_from_h5_video(
     normalize=False,
     bg_smooth_size=0,
     exclusion_threshold=0.4,
+    ols=True,
+    weighted=True,
 ):
     """
     Extract ROI traces from H5 video file using streaming.
@@ -203,6 +222,10 @@ def extract_from_h5_video(
         Savitzky-Golay window for neuropil smoothing.
     exclusion_threshold : float
         Fraction threshold for excluding other ROIs from annulus.
+    ols : bool
+        If True, use OLS regression. If False, use weighted summation.
+    weighted : bool
+        If True, use ROI weights. If False, use uniform weights.
 
     Returns
     -------
@@ -228,12 +251,15 @@ def extract_from_h5_video(
             normalize=normalize,
             bg_smooth_size=bg_smooth_size,
             exclusion_threshold=exclusion_threshold,
+            ols=ols,
+            weighted=weighted,
         )
 
         # Precompute phase: accumulate mean image and neuropil
         with extractor.precompute():
             for start in range(0, T, batch_size):
                 end = min(start + batch_size, T)
+                info(f"Precomputation: batch {start}-{end} out of 0-{T}.")
                 # video is (T, H, W), need (H, W, B) for extractor
                 batch = video[start:end, :, :].transpose(1, 2, 0)
                 extractor.receive_batch(batch)
@@ -243,11 +269,13 @@ def extract_from_h5_video(
         with extractor.extract():
             for start in range(0, T, batch_size):
                 end = min(start + batch_size, T)
+                info(f"Extraction: batch {start}-{end} out of 0-{T}.")
                 batch = video[start:end, :, :].transpose(1, 2, 0)
                 F_batch = extractor.receive_batch(batch)
                 traces_list.append(F_batch)
 
     F = np.concatenate(traces_list, axis=1)
+    info(f"[STREAM] Final F shape: {F.shape}, mean: {F.mean():.6f}, std: {F.std():.6f}")
     return F.astype(np.float32)
 
 
@@ -259,6 +287,8 @@ def extract_from_svd(
     normalize=False,
     bg_smooth_size=0,
     exclusion_threshold=0.4,
+    ols=True,
+    weighted=True,
 ):
     """
     Extract ROI traces from SVDVideo without reconstructing full frames.
@@ -279,6 +309,10 @@ def extract_from_svd(
         Savitzky-Golay window for smoothing neuropil (must be odd or 0).
     exclusion_threshold : float
         Fraction threshold for excluding other ROIs from annulus.
+    ols : bool
+        If True, use OLS regression. If False, use weighted summation.
+    weighted : bool
+        If True, use ROI weights. If False, use uniform weights.
 
     Returns
     -------
@@ -312,37 +346,60 @@ def extract_from_svd(
 
     # Reuse shared helpers
     active_idx, W_act = _active_and_flatten(W)
+    info(f"[SVD] W_act shape: {W_act.shape}, mean: {W_act.mean():.6f}, std: {W_act.std():.6f}")
+
+    # Apply uniform weights if requested (normalize by L2 norm)
+    if not weighted:
+        W_act = _apply_uniform_weights(W_act)
+        info(f"[SVD] After uniform weights - W_act mean: {W_act.mean():.6f}, std: {W_act.std():.6f}")
 
     if W.ndim != 3:
         raise ValueError("Neuropil annuli require W as (H,W,K) to perform dilation")
     annuli = _build_annuli(W, neuropil_range, all_roi_mask, exclusion_threshold)
+    info(f"[SVD] Annuli sizes: {[len(a) for a in annuli]}")
 
-    # Mean image from SVD: mean(Y, axis=0) = mean(U, axis=0) @ diag(S) @ Vt
-    U_mean = U.mean(axis=0)  # (R,)
-    mean_image_full = (U_mean * S) @ Vt_flat  # (P,)
-    mean_image_norm = _normalize_mean_image(mean_image_full[active_idx])
+    # Compute neuropil from SVD (needed for both OLS and simple summation)
+    if annuli is not None:
+        F_np = _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size)
+        info(f"[SVD] Neuropil F_np shape: {F_np.shape}, mean: {F_np.mean():.6f}, std: {F_np.std():.6f}")
 
-    # Build design matrix and pseudo-inverse
-    design, weights = _finalize_design(W_act, mean_image_norm)
-    design_pinv = np.linalg.pinv(design).astype(np.float32)
+    if ols:
+        # Mean image from SVD: mean(Y, axis=0) = mean(U, axis=0) @ diag(S) @ Vt
+        U_mean = U.mean(axis=0)  # (R,)
+        mean_image_full = (U_mean * S) @ Vt_flat  # (P,)
+        mean_image_norm = _normalize_mean_image(mean_image_full[active_idx])
+        info(f"[SVD] mean_image_norm shape: {mean_image_norm.shape}, mean: {mean_image_norm.mean():.6f}, std: {mean_image_norm.std():.6f}")
 
-    # Project design through SVD spatial basis
-    # C = design_pinv @ Y_act.T, where Y_act.T = Vt_act.T @ diag(S) @ U.T
-    Vt_act = Vt_flat[:, active_idx]  # (R, P_active)
-    proj = design_pinv @ Vt_act.T  # (K+1, R)
-    C = (proj * S) @ U.T  # (K+1, T)
+        # Build design matrix and pseudo-inverse
+        design, weights_dict = _finalize_design(W_act, mean_image_norm)
+        design_pinv = np.linalg.pinv(design).astype(np.float32)
+        info(f"[SVD] design shape: {design.shape}, design_pinv norm: {np.linalg.norm(design_pinv):.6f}")
 
-    # Compute neuropil from SVD
-    F_np = _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size)
+        # Project design through SVD spatial basis
+        # C = design_pinv @ Y_act.T, where Y_act.T = Vt_act.T @ diag(S) @ U.T
+        Vt_act = Vt_flat[:, active_idx]  # (R, P_active)
+        proj = design_pinv @ Vt_act.T  # (K+1, R)
+        C = (proj * S) @ U.T  # (K+1, T)
 
-    # Rescale and subtract neuropil
-    F = _rescale_coefficients(C, weights, F_np)
+        # Rescale and subtract neuropil
+        F = _rescale_coefficients(C, weights_dict, F_np if annuli is not None else None)
+        info(f"[SVD] OLS output F shape: {F.shape}, mean: {F.mean():.6f}, std: {F.std():.6f}")
+    else:
+        # Simple weighted summation (still with neuropil subtraction)
+        # F[k, t] = sum_p(W_act[p, k] * Y[t, p]) - F_np[k, t]
+        # Using SVD: Y = U @ diag(S) @ Vt, so sum over active pixels:
+        # F[k, :] = W_act[:, k].T @ Vt_act.T @ diag(S) @ U.T
+        Vt_act = Vt_flat[:, active_idx]  # (R, P_active)
+        proj = W_act.T @ Vt_act.T  # (K, R)
+        F = (proj * S) @ U.T  # (K, T)
+        F = F - F_np
 
     if normalize:
         baseline = np.median(F, axis=1, keepdims=True)
         baseline[baseline == 0] = 1.0
         F = 100.0 * (F - baseline) / baseline
 
+    info(f"[SVD] Final F shape: {F.shape}, mean: {F.mean():.6f}, std: {F.std():.6f}")
     return F.astype(np.float32)
 
 
@@ -375,12 +432,30 @@ def _active_and_flatten(W):
     return active_idx, W_act
 
 
+def _apply_uniform_weights(W_act):
+    """Replace weights with uniform weights normalized by L2 norm.
+
+    For each ROI k, sets all nonzero weights to 1/sqrt(n_pixels_k).
+    This makes the weighted sum equivalent to a normalized average.
+    """
+    W_uniform = np.zeros_like(W_act)
+    K = W_act.shape[1]
+    for k in range(K):
+        mask = W_act[:, k] > 0
+        n_pixels = np.sum(mask)
+        if n_pixels > 0:
+            W_uniform[mask, k] = 1.0 / np.sqrt(n_pixels)
+    return W_uniform
+
+
 def _build_annuli(W, neuropil_range, all_roi_mask, exclusion_threshold):
     """Precompute annulus indices per ROI with exclusion logic."""
     if W.ndim != 3:
         raise ValueError("_build_annuli requires W as (H,W,K)")
     H, Ww, K = W.shape
     r_inner, r_outer = neuropil_range
+    if r_inner < 0:
+        return None
     if all_roi_mask is None:
         all_roi_mask = np.any(W > 0, axis=2)
     annuli = []
@@ -465,6 +540,8 @@ class StreamingTimeSeriesExtractor:
         normalize=False,
         bg_smooth_size=0,
         exclusion_threshold=0.4,
+        ols=True,
+        weighted=True,
     ):
         _validate_params(neuropil_range, bg_smooth_size, exclusion_threshold)
         r_inner, r_outer = neuropil_range
@@ -474,6 +551,8 @@ class StreamingTimeSeriesExtractor:
         self.r_inner = r_inner
         self.r_outer = r_outer
         self.exclusion_threshold = exclusion_threshold
+        self.ols = ols
+        self.weighted = weighted
 
         # Determine shapes and store mask W (require float masks for OLS)
         self.W = W.astype(np.float32)
@@ -495,6 +574,12 @@ class StreamingTimeSeriesExtractor:
 
         # Active pixels and flattened masks
         self.active_idx, self.W_act = _active_and_flatten(self.W)
+        info(f"[STREAM] W_act shape: {self.W_act.shape}, mean: {self.W_act.mean():.6f}, std: {self.W_act.std():.6f}")
+
+        # Apply uniform weights if requested
+        if not self.weighted:
+            self.W_act = _apply_uniform_weights(self.W_act)
+            info(f"[STREAM] After uniform weights - W_act mean: {self.W_act.mean():.6f}, std: {self.W_act.std():.6f}")
 
         # Precompute annuli indices per ROI in init (requires 2D masks)
         if self._spatial_shape is None:
@@ -502,6 +587,7 @@ class StreamingTimeSeriesExtractor:
         self.annuli = _build_annuli(
             self.W, (self.r_inner, self.r_outer), self.all_roi_mask, self.exclusion_threshold
         )
+        info(f"[STREAM] Annuli sizes: {[len(a) for a in self.annuli]}")
 
         # Internal state for phases
         self._in_precompute = False
@@ -531,13 +617,23 @@ class StreamingTimeSeriesExtractor:
         try:
             yield self
         finally:
-            # Finalize mean image normalization
+            # Finalize mean image normalization (needed for OLS)
             mean_image = self._finalize_mean(self._sum_per_pixel, self._count_frames)
             self._mean_image_norm = _normalize_mean_image(mean_image)
-            # Build design and weights
-            self._design, self._weights = _finalize_design(self.W_act, self._mean_image_norm)
-            # Compute pseudo-inverse now that design is fixed
-            self._design_pinv = np.linalg.pinv(self._design).astype(np.float32)
+            info(f"[STREAM] mean_image_norm shape: {self._mean_image_norm.shape}, mean: {self._mean_image_norm.mean():.6f}, std: {self._mean_image_norm.std():.6f}")
+
+            if self.ols:
+                # Build design and weights for OLS
+                self._design, self._weights = _finalize_design(self.W_act, self._mean_image_norm)
+                # Compute pseudo-inverse now that design is fixed
+                self._design_pinv = np.linalg.pinv(self._design).astype(np.float32)
+                info(f"[STREAM] design shape: {self._design.shape}, design_pinv norm: {np.linalg.norm(self._design_pinv):.6f}")
+            else:
+                # For simple summation, just need the weights for weighted sum
+                self._design = None
+                self._design_pinv = None
+                self._weights = None
+
             # Concatenate neuropil across batches and optionally smooth across time
             if len(self._neuropil_accum) > 0:
                 F_np = np.concatenate(self._neuropil_accum, axis=1)
@@ -548,6 +644,7 @@ class StreamingTimeSeriesExtractor:
                         for k in range(self.K)
                     ])
                 self._neuropil_ts = F_np.astype(np.float32)
+                info(f"[STREAM] Neuropil _neuropil_ts shape: {self._neuropil_ts.shape}, mean: {self._neuropil_ts.mean():.6f}, std: {self._neuropil_ts.std():.6f}")
             else:
                 self._neuropil_ts = None
             # Cleanup precompute flags
@@ -558,8 +655,12 @@ class StreamingTimeSeriesExtractor:
         """Consume batches and output OLS-unmixed traces using finalized design and neuropil."""
         if self._in_precompute or self._in_extract:
             raise RuntimeError("Cannot start extract while another phase is active")
-        if self._design_pinv is None or self._weights is None or self._mean_image_norm is None:
-            raise RuntimeError("precompute must be completed before extract")
+        if self.ols:
+            if self._design_pinv is None or self._weights is None or self._mean_image_norm is None:
+                raise RuntimeError("precompute must be completed before extract")
+        else:
+            if self._mean_image_norm is None:
+                raise RuntimeError("precompute must be completed before extract")
         # Prepare normalization baseline if enabled (defer if streaming baseline is needed)
         self._in_extract = True
         try:
@@ -590,10 +691,17 @@ class StreamingTimeSeriesExtractor:
             return None
 
         if self._in_extract:
-            # OLS solve and rescale
-            F_batch = self._solve_and_rescale(
-                Y_act, self._design_pinv, self._weights, self._neuropil_slice(B)
-            )
+            neuropil_batch = self._neuropil_slice(B)
+            if self.ols:
+                # OLS solve and rescale
+                F_batch = self._solve_and_rescale(
+                    Y_act, self._design_pinv, self._weights, neuropil_batch
+                )
+                info(f"[STREAM] OLS batch F shape: {F_batch.shape}, mean: {F_batch.mean():.6f}, std: {F_batch.std():.6f}")
+            else:
+                # Simple weighted summation with neuropil subtraction
+                F_batch = self._weighted_sum(Y_act, neuropil_batch)
+
             # Optional normalization: compute baseline on first call if not set
             if self.normalize:
                 if self._baseline is None:
@@ -614,26 +722,32 @@ class StreamingTimeSeriesExtractor:
         # Mean image accumulation over active pixels
         self._sum_per_pixel += Y_act.sum(axis=1)
         self._count_frames += Y_act.shape[1]
-        # Neuropil per-ROI for this batch
-        K = self.K
-        B = Y_act.shape[1]
-        F_np_batch = np.zeros((K, B), dtype=np.float32)
-        for k in range(K):
-            idx = annuli[k]
-            if idx.size == 0:
-                # Fallback: zero neuropil if no annulus pixels
-                F_np_batch[k, :] = 0.0
-                continue
-            F_np_batch[k, :] = Y_flat[idx, :].mean(axis=0)
-        if bg_smooth_size > 0:
+        if annuli is not None:
+            # Neuropil per-ROI for this batch
+            K = self.K
+            B = Y_act.shape[1]
+            F_np_batch = np.zeros((K, B), dtype=np.float32)
             for k in range(K):
-                F_np_batch[k, :] = savgol_filter(F_np_batch[k, :], window_length=bg_smooth_size, polyorder=2)
-        self._neuropil_accum.append(F_np_batch)
+                idx = annuli[k]
+                if idx.size == 0:
+                    # Fallback: zero neuropil if no annulus pixels
+                    F_np_batch[k, :] = 0.0
+                    continue
+                F_np_batch[k, :] = Y_flat[idx, :].mean(axis=0)
+            self._neuropil_accum.append(F_np_batch)
 
     def _solve_and_rescale(self, Y_batch_act, design_pinv, weights, neuropil_batch):
         """Apply pseudo-inverse to get coefficients and rescale to absolute fluorescence."""
         C = design_pinv @ Y_batch_act  # (K+1, B)
         return _rescale_coefficients(C, weights, neuropil_batch)
+
+    def _weighted_sum(self, Y_batch_act, neuropil_batch):
+        """Compute simple weighted sum of pixels with neuropil subtraction."""
+        # F[k, :] = W_act[:, k].T @ Y_batch_act - neuropil[k, :]
+        F = self.W_act.T @ Y_batch_act  # (K, B)
+        if neuropil_batch is not None:
+            F = F - neuropil_batch
+        return F.astype(np.float32)
 
     def _neuropil_slice(self, B):
         """Return neuropil segment matching the batch width, if precomputed."""

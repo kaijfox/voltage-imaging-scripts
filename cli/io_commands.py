@@ -253,3 +253,5 @@ def svd_info(path):
         click.echo("\nAttributes:")
         for key, val in f.attrs.items():
             click.echo(f"  {key}: {val}")
+
+

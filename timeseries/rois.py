@@ -126,7 +126,7 @@ class ROICollection:
             roi_list = []
             for roi in rois:
                 roi_list.append({
-                    'pixel_idx': roi.to_linear_indices(shape).astype(np.float64),
+                    'pixel_idx': roi.to_linear_indices(shape),
                     'weights': roi.weights.astype(np.float64),
                     'code': roi.code.astype(np.float64) if len(roi.code) > 0 else np.array([]),
                 })
@@ -209,6 +209,8 @@ class ROICollection:
                 indices = np.atleast_1d(roi_data.PixelIdxList)
             else:
                 continue
+            # Ensure integer format
+            indices = indices.astype(int)
 
             weights = getattr(roi_data, 'weights', None)
             if weights is not None:

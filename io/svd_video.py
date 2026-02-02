@@ -216,18 +216,18 @@ class SVDVideo:
             f.attrs['dtype'] = str(U.dtype)
 
     def __getitem__(self, idx):
+        # If only indexed on time argument is a slice not a tuple
+        if hasattr(idx, "start"):
+            idx = (idx,)
         time_idx, spatial_idx = idx[0], idx[1:]
-        print(time_idx, spatial_idx)
         Usel = self.U[time_idx]
         Vsel = self.Vt[:, *spatial_idx]
 
-        print(f"Usel {Usel.shape} Vsel {Vsel.shape}")
         if Usel.ndim == 1:
             Uscaled = Usel * self.S
             reconst = (Vsel.T @ Uscaled[None].T).T[0]
         else:
             Uscaled = Usel * self.S[None, :]
-            print(f"Uscaled {Uscaled.shape}")
             reconst = (Vsel.T @ Uscaled.T).T
 
         return reconst
