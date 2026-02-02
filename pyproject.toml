@@ -13,13 +13,11 @@ dependencies = [
     "matplotlib",
     "seaborn",
     "tqdm",
-    "click"
+    "click",
+    "array-api-compat",
 ]
 
 [project.optional-dependencies]
-io = [
-    "array-api-compat",
-]
 dev = [
     "imageio[pyav]",
     "pytest"

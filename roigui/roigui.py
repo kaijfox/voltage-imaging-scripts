@@ -99,7 +99,7 @@ def launch(
         if not Path(data).exists():
             raise ValueError("Data source appears to be a nonexistent file.")
         print(f"Loading SVD from {data}...")
-        svd = SRSVD(data).to_loaded_svd()
+        svd = SVDVideo.load(data)
         data_source = PrecomputedSVDDataSource(
             svd, n_components=n_components, tmin=tmin, tmax=tmax
         )

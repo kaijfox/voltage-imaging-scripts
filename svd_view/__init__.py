@@ -29,7 +29,7 @@ from .viewer import SVDViewer
 
 
 def launch(
-    source: Union[str, Path, "SVDVideo", LazyHDF5SVDSource],
+    source: Union[str, Path, "SVDVideo", LazyHDF5SVDSource], #type: ignore
     napari_viewer=None,
     rank: Optional[int] = None,
     spatial_roi: Optional[Tuple[int, int, int, int]] = None,
