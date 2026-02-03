@@ -76,6 +76,8 @@ class ROI:
 class ROICollection:
     rois: List['ROI'] = field(default_factory=list)
     image_shape: Optional[Tuple[int, int]] = None  # Set when loaded from .mat
+    ids: Optional[List[str]] = None
+    colors: Optional[List[Tuple[int, int, int]]] = None
 
     def save(self, path: os.PathLike, shape: Optional[Tuple[int, int]] = None):
         """Save all ROIs to output file."""

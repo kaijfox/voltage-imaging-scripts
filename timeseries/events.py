@@ -6,12 +6,13 @@ import numpy as np
 from scipy.signal import savgol_filter
 
 from .types import Events, Traces
+from ..cli.common import configure_logging
 
 
 def detect_spikes(
     traces: Traces,
-    sg_window_frames: int,
     sd_threshold: float,
+    sg_window_frames: int | None = None,
     positive_going: bool = False,
 ) -> tuple[Traces, Events, dict[str, Any]]:
     """Detect spikes using Savitzky-Golay high-pass filtering.
@@ -22,8 +23,8 @@ def detect_spikes(
 
     Args:
         traces: Input traces object
-        sg_window_frames: Savitzky-Golay filter window in frames (must be odd)
         sd_threshold: Number of standard deviations for spike detection
+        sg_window_frames: Savitzky-Golay filter window in frames (must be odd). If None, no HPF is applied.
         positive_going: If True, detect positive-going spikes; if False, negative-going
 
     Returns:
@@ -34,15 +35,23 @@ def detect_spikes(
             - 'spike_amplitudes': list of arrays of spike amplitudes per cell
             - 'spike_sbr': list of arrays of signal-to-baseline ratios per cell
     """
-    if sg_window_frames % 2 == 0:
+
+    logger, (error, warning, info, debug) = configure_logging("events")
+
+    # Only adjust window length if one was provided
+    if sg_window_frames is not None and sg_window_frames % 2 == 0:
         sg_window_frames += 1
 
     data = traces.data
     n_cells, n_frames = data.shape
 
     # Compute baseline using Savitzky-Golay filter (2nd order)
-    baseline = savgol_filter(data, window_length=sg_window_frames, polyorder=2, axis=1)
-    vmhigh = data - baseline
+    if sg_window_frames is not None:
+        baseline = savgol_filter(data, window_length=sg_window_frames, polyorder=2, axis=1)
+        vmhigh = data - baseline
+    else:
+        info("Not applying high-pass filter! No window length specified.")
+        vmhigh = data.copy()
 
     spike_frames_list = []
     spike_amplitudes_list = []

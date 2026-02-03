@@ -3,7 +3,7 @@
 import click
 from .common import enable_logging
 from .io_commands import convert, slice_cmd, h5_convert, divisive_lowpass_cmd, svd_info
-from .ts_commands import extract_traces_cmd
+from .ts_commands import extract_traces_cmd, trace_dff, detect_spikes_cmd
 
 @click.group()
 @click.option("-v", "--verbose", count=True, help="Increase verbosity (-v, -vv, -vvv)")
@@ -25,6 +25,8 @@ cli.add_command(slice_cmd,              "slice")
 cli.add_command(divisive_lowpass_cmd,   "video-dff")
 cli.add_command(svd_info,               "svd-info")
 cli.add_command(extract_traces_cmd,     "extract-traces")
+cli.add_command(trace_dff,              "trace-dff")
+cli.add_command(detect_spikes_cmd,      "detect-spikes")
 
 # Allow calling as module
 if __name__ == "__main__":

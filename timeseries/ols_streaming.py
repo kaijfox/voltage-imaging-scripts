@@ -275,7 +275,6 @@ def extract_from_h5_video(
                 traces_list.append(F_batch)
 
     F = np.concatenate(traces_list, axis=1)
-    info(f"[STREAM] Final F shape: {F.shape}, mean: {F.mean():.6f}, std: {F.std():.6f}")
     return F.astype(np.float32)
 
 
@@ -346,34 +345,28 @@ def extract_from_svd(
 
     # Reuse shared helpers
     active_idx, W_act = _active_and_flatten(W)
-    info(f"[SVD] W_act shape: {W_act.shape}, mean: {W_act.mean():.6f}, std: {W_act.std():.6f}")
 
     # Apply uniform weights if requested (normalize by L2 norm)
     if not weighted:
         W_act = _apply_uniform_weights(W_act)
-        info(f"[SVD] After uniform weights - W_act mean: {W_act.mean():.6f}, std: {W_act.std():.6f}")
 
     if W.ndim != 3:
         raise ValueError("Neuropil annuli require W as (H,W,K) to perform dilation")
     annuli = _build_annuli(W, neuropil_range, all_roi_mask, exclusion_threshold)
-    info(f"[SVD] Annuli sizes: {[len(a) for a in annuli]}")
 
     # Compute neuropil from SVD (needed for both OLS and simple summation)
     if annuli is not None:
         F_np = _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size)
-        info(f"[SVD] Neuropil F_np shape: {F_np.shape}, mean: {F_np.mean():.6f}, std: {F_np.std():.6f}")
 
     if ols:
         # Mean image from SVD: mean(Y, axis=0) = mean(U, axis=0) @ diag(S) @ Vt
         U_mean = U.mean(axis=0)  # (R,)
         mean_image_full = (U_mean * S) @ Vt_flat  # (P,)
         mean_image_norm = _normalize_mean_image(mean_image_full[active_idx])
-        info(f"[SVD] mean_image_norm shape: {mean_image_norm.shape}, mean: {mean_image_norm.mean():.6f}, std: {mean_image_norm.std():.6f}")
 
         # Build design matrix and pseudo-inverse
         design, weights_dict = _finalize_design(W_act, mean_image_norm)
         design_pinv = np.linalg.pinv(design).astype(np.float32)
-        info(f"[SVD] design shape: {design.shape}, design_pinv norm: {np.linalg.norm(design_pinv):.6f}")
 
         # Project design through SVD spatial basis
         # C = design_pinv @ Y_act.T, where Y_act.T = Vt_act.T @ diag(S) @ U.T
@@ -383,7 +376,6 @@ def extract_from_svd(
 
         # Rescale and subtract neuropil
         F = _rescale_coefficients(C, weights_dict, F_np if annuli is not None else None)
-        info(f"[SVD] OLS output F shape: {F.shape}, mean: {F.mean():.6f}, std: {F.std():.6f}")
     else:
         # Simple weighted summation (still with neuropil subtraction)
         # F[k, t] = sum_p(W_act[p, k] * Y[t, p]) - F_np[k, t]
@@ -399,7 +391,6 @@ def extract_from_svd(
         baseline[baseline == 0] = 1.0
         F = 100.0 * (F - baseline) / baseline
 
-    info(f"[SVD] Final F shape: {F.shape}, mean: {F.mean():.6f}, std: {F.std():.6f}")
     return F.astype(np.float32)
 
 
@@ -574,12 +565,10 @@ class StreamingTimeSeriesExtractor:
 
         # Active pixels and flattened masks
         self.active_idx, self.W_act = _active_and_flatten(self.W)
-        info(f"[STREAM] W_act shape: {self.W_act.shape}, mean: {self.W_act.mean():.6f}, std: {self.W_act.std():.6f}")
 
         # Apply uniform weights if requested
         if not self.weighted:
             self.W_act = _apply_uniform_weights(self.W_act)
-            info(f"[STREAM] After uniform weights - W_act mean: {self.W_act.mean():.6f}, std: {self.W_act.std():.6f}")
 
         # Precompute annuli indices per ROI in init (requires 2D masks)
         if self._spatial_shape is None:
@@ -587,7 +576,6 @@ class StreamingTimeSeriesExtractor:
         self.annuli = _build_annuli(
             self.W, (self.r_inner, self.r_outer), self.all_roi_mask, self.exclusion_threshold
         )
-        info(f"[STREAM] Annuli sizes: {[len(a) for a in self.annuli]}")
 
         # Internal state for phases
         self._in_precompute = False
@@ -620,14 +608,12 @@ class StreamingTimeSeriesExtractor:
             # Finalize mean image normalization (needed for OLS)
             mean_image = self._finalize_mean(self._sum_per_pixel, self._count_frames)
             self._mean_image_norm = _normalize_mean_image(mean_image)
-            info(f"[STREAM] mean_image_norm shape: {self._mean_image_norm.shape}, mean: {self._mean_image_norm.mean():.6f}, std: {self._mean_image_norm.std():.6f}")
 
             if self.ols:
                 # Build design and weights for OLS
                 self._design, self._weights = _finalize_design(self.W_act, self._mean_image_norm)
                 # Compute pseudo-inverse now that design is fixed
                 self._design_pinv = np.linalg.pinv(self._design).astype(np.float32)
-                info(f"[STREAM] design shape: {self._design.shape}, design_pinv norm: {np.linalg.norm(self._design_pinv):.6f}")
             else:
                 # For simple summation, just need the weights for weighted sum
                 self._design = None
@@ -644,7 +630,6 @@ class StreamingTimeSeriesExtractor:
                         for k in range(self.K)
                     ])
                 self._neuropil_ts = F_np.astype(np.float32)
-                info(f"[STREAM] Neuropil _neuropil_ts shape: {self._neuropil_ts.shape}, mean: {self._neuropil_ts.mean():.6f}, std: {self._neuropil_ts.std():.6f}")
             else:
                 self._neuropil_ts = None
             # Cleanup precompute flags
@@ -697,7 +682,6 @@ class StreamingTimeSeriesExtractor:
                 F_batch = self._solve_and_rescale(
                     Y_act, self._design_pinv, self._weights, neuropil_batch
                 )
-                info(f"[STREAM] OLS batch F shape: {F_batch.shape}, mean: {F_batch.mean():.6f}, std: {F_batch.std():.6f}")
             else:
                 # Simple weighted summation with neuropil subtraction
                 F_batch = self._weighted_sum(Y_act, neuropil_batch)

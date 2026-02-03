@@ -155,3 +155,144 @@ def extract_traces_cmd(
     )
     traces.save_mat(output_path)
     info("Done")
+
+
+@click.command()
+@input_output_options
+@click.option(
+    "--mode",
+    type=click.Choice(["savgol_add", "savgol_mult", "2exp"]),
+    required=True,
+    help="DF/F filtering mode.",
+)
+@click.option(
+    "-bo", "--output-baselines", "baselines_path",
+    type=click.Path(), help="Output baselines file path."
+)
+@click.option(
+    "-w",
+    "--window-length",
+    type=int,
+    help="Savitzky-Golay window length (must be odd).",
+)
+@click.option(
+    "-p", "--polyorder", type=int, help="Polynomial order for filter."
+)
+def trace_dff(
+    input_path,
+    output_path,
+    mode,
+    baselines_path,
+    window_length,
+    polyorder
+):
+
+    from ..timeseries.filtering import filter_dff
+    from ..timeseries.types import Traces
+
+    logger, (error, warning, info, debug) = configure_logging("dff")
+
+    # load traces
+    traces = Traces.from_mat(input_path)
+
+    # fail if mode includes savgol and window/polyorder not given
+    if mode in ["savgol_add", "savgol_mult"]:
+        if window_length is None:
+            raise click.BadParameter(
+                "--window-length is required for savgol df/f modes"
+            )
+        if polyorder is None:
+            raise click.BadParameter(
+                "--polyorder is required for savgol df/f modes"
+            )
+        if window_length % 2 == 0:
+            raise click.BadParameter("--window-length must be odd")
+        if polyorder >= window_length:
+            raise click.BadParameter("--polyorder must be < window-length")
+
+    # apply df/f filter
+    filtered, baselines = filter_dff(
+        traces,
+        mode=mode,
+        window_length=window_length,
+        polyorder=polyorder,
+    )
+
+    # save filtered traces & (optionally) baselines
+    info(f"Saving dF/F traces to {output_path}")
+    filtered.save_mat(output_path)
+    if baselines_path is not None:
+        info(f"Saving baselines to {baselines_path}")
+        baselines.save_mat(baselines_path)
+
+
+@click.command()
+@input_output_options
+@click.option(
+    "-w", "--sg-window-frames",
+    type=int,
+    default=None,
+    help="Savitzky-Golay window in frames (must be odd). If omitted, no HPF is applied.",
+)
+@click.option(
+    "-t", "--sd-threshold",
+    type=float,
+    required=True,
+    help="Number of baseline SDs for spike detection.",
+)
+@click.option(
+    "--positive-going",
+    is_flag=True,
+    help="Detect positive-going spikes instead of negative-going.",
+)
+@click.option(
+    "--info-out",
+    "info_path",
+    type=click.Path(),
+    default=None,
+    help="Optional .mat file path to save detection info (baseline_noise, amplitudes, sbr).",
+)
+def detect_spikes_cmd(
+    input_path,
+    output_path,
+    sg_window_frames,
+    sd_threshold,
+    positive_going,
+    info_path,
+):
+    """Detect spikes in traces using Savitzky-Golay high-pass filtering."""
+    from ..timeseries.events import detect_spikes
+    from ..timeseries.types import Traces
+    import scipy.io as sio
+
+    logger, (error, warning, info, debug) = configure_logging("events")
+
+    # load traces
+    traces = Traces.from_mat(input_path)
+
+    # validate sg window if provided
+    if sg_window_frames is not None and sg_window_frames % 2 == 0:
+        raise click.BadParameter("--sg-window-frames must be odd")
+
+    # run detection
+    try:
+        hpf_traces, events, info_dict = detect_spikes(
+            traces,
+            sd_threshold=sd_threshold,
+            sg_window_frames=sg_window_frames,
+            positive_going=positive_going,
+        )
+    except Exception as exc:
+        error(f"Spike detection failed: {exc}")
+        raise
+
+    # save events
+    info(f"Saving events to {output_path}")
+    events.save_mat(output_path)
+
+    # optionally save info
+    if info_path is not None:
+        info(f"Saving detection info to {info_path}")
+        sio.savemat(str(info_path), info_dict)
+
+    info("Done")
