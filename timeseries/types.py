@@ -35,10 +35,13 @@ class Traces:
         """Load from .mat file."""
         mat = sio.loadmat(str(path), squeeze_me=True)
         ids = mat.get('ids', None)
+        n = mat['data'].shape[0]
         if isinstance(ids, np.ndarray):
             ids = ids.tolist()
         elif ids is None:
             ids = None
+        elif isinstance(ids, str): # matfile can flatten [str] to str
+            ids = [ids]
         else:
             raise ValueError(f"Invalid `ids` field in Traces matfile: {type(ids)}")
         return cls(

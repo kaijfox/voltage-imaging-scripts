@@ -57,6 +57,11 @@ from .common import (
     is_flag=True,
     help="Use uniform weights instead of ROI collection weights.",
 )
+@click.option(
+    "--no-mean",
+    is_flag=True,
+    help="Do not compute mean image / exclude mean from the OLS design.",
+)
 def extract_traces_cmd(
     input_path,
     output_path,
@@ -70,6 +75,7 @@ def extract_traces_cmd(
     exclusion_threshold,
     no_ols,
     unweighted,
+    no_mean,
 ):
     """Extract ROI traces from video (SVD or raw H5)."""
     import h5py
@@ -144,6 +150,7 @@ def extract_traces_cmd(
             batch_size=batch_size,
             ols=not no_ols,
             weighted=not unweighted,
+            compute_mean=not no_mean,
         )
     except Exception as exc:
         error(f"Extraction failed: {exc}")

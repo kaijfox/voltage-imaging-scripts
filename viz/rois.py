@@ -293,6 +293,7 @@ def display_traces(
     select: Optional[Sequence[int] | Sequence[str]] = None,
     fig: Optional[plt.Figure] = None,
     axis: Optional[plt.Axes] = None,
+    ticks: Optional[Sequence[float]] = None,
 ) -> Dict[str, Any]:
     """Plot traces for a set of ROIs.
 
@@ -342,9 +343,28 @@ def display_traces(
         ax.plot(x, y, color=color)
         positions.append(k * offset)
 
+    # Labeled ticks around the traces & axis labels
+    if ticks is not None:
+        # Interleave trace label names with data coordinate ticks
+        ticks = np.array(ticks, dtype=float)
+        if 0. not in ticks:
+            ticks = np.concatenate(([0.0], ticks))
+        zero_idx = np.where(ticks == 0.0)[0][0]
+        tick_locations = np.array(positions)[None, :] + np.array(ticks)[:, None]
+        tick_labels = np.full(tick_locations.shape, "", dtype=object)
+        tick_labels[zero_idx, :] = names
+        # Flatten and sort
+        tick_sort = np.argsort(tick_locations.ravel())
+        tick_locations = tick_locations.ravel()[tick_sort]
+        tick_labels = tick_labels.ravel()[tick_sort]
+    else:
+        # Only label trace ids
+        tick_locations = positions
+        tick_labels = names
+
+    ax.set_yticks(tick_locations)
+    ax.set_yticklabels(tick_labels)
     ax.set_xlabel(xlabel)
-    ax.set_yticks(positions)
-    ax.set_yticklabels(names)
 
     return fig, ax, {"positions": positions, "colors": colors, "names": names}
 
@@ -356,6 +376,7 @@ def display_events(
     select: Optional[Sequence[int] | Sequence[str]] = None,
     fig: Optional[plt.Figure] = None,
     axis: Optional[plt.Axes] = None,
+    **plot_kws,
 ) -> Dict[str, Any]:
     """Display events aligned to traces or as separate event rows."""
     # Convert select similar to display_traces
@@ -394,22 +415,29 @@ def display_events(
             # sample y positions at integer frame indices (clip indices)
             idx = np.clip(spikes.astype(int), 0, y_trace.size - 1)
             yvals = y_trace[idx]
-            ax.plot(
-                xvals,
-                yvals,
+            plot_kws = {**dict(
                 linestyle="None",
                 marker=".",
                 label=getattr(events, "ids", None) and events.ids[i],
+            ), **plot_kws}
+            ax.plot(
+                xvals,
+                yvals,
+                **plot_kws
             )
         elif trace_locations is not None:
             # events as vertical bars matching extent
             ymin, ymax = trace_locations[i]
             for xv in xvals:
-                ax.vlines(xv, ymin, ymax)
+                ax.vlines(xv, ymin, ymax, **plot_kws)
         else:
+            plot_kws = {**dict(
+                linestyle="None", marker="|",
+                label=getattr(events, "ids", None) and events.ids[i],
+            ), **plot_kws}
             # events as points on separate row
             y = -k  # separate row per ROI
-            ax.plot(xvals, np.full_like(xvals, y), linestyle="None", marker="|")
+            ax.plot(xvals, np.full_like(xvals, y), **plot_kws)
         plotted.append(i)
 
     ax.set_xlabel(xlabel)

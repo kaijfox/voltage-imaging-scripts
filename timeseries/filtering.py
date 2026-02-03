@@ -41,6 +41,7 @@ def filter_dff(
 
     if mode == "2exp":
         dff = np.zeros_like(data)
+        baseline = np.zeros_like(data)
         T = data.shape[1]
         time = np.arange(T)
         for i in range(data.shape[0]):
@@ -70,16 +71,16 @@ def filter_dff(
                 warning(f"Curve fit failed for trace {i}, not filtering")
                 dff[i] = data[i]
                 continue
-            baseline = double_exponential_curve(time, *popt)
-            dff[i] = data[i] - baseline
+            baseline[i] = double_exponential_curve(time, *popt)
+            dff[i] = data[i] / baseline[i]
 
     if mode == "savgol_add":
-        baseline = signal.savgol_filter(data, window_length, polyorder, axis=1)
-        dff = data - baseline
+        baseline[i] = signal.savgol_filter(data, window_length, polyorder, axis=1)
+        dff = data - baseline[i]
 
     if mode == "savgol_mult":
-        baseline = signal.savgol_filter(data, window_length, polyorder, axis=1)
-        dff = data / baseline
+        baseline[i] = signal.savgol_filter(data, window_length, polyorder, axis=1)
+        dff = data / baseline[i]
 
     return (
         Traces(dff, traces.ids, traces.fs),
