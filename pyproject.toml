@@ -15,6 +15,7 @@ dependencies = [
     "tqdm",
     "click",
     "array-api-compat",
+    "awkward",
 ]
 
 [project.optional-dependencies]
