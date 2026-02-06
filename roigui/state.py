@@ -41,6 +41,11 @@ class AppState(QObject):
         - `roi` / `roi_geometry` refer to the current ROI
         - `roi_list_changed` emitted when ROIs added/removed
         - `current_roi_index_changed` emitted when switching ROIs
+
+    ROI IDs:
+        - `roi_ids` returns list of string IDs for all ROIs
+        - IDs default to "ROI 1", "ROI 2", etc. but can be renamed
+        - `_persist_ids` controls whether IDs are saved to file
     """
 
     # Signals
@@ -49,6 +54,7 @@ class AppState(QObject):
     roi_list_changed = Signal()  # ROI list modified (add/remove)
     current_roi_index_changed = Signal(int)  # Switched to different ROI
     show_all_rois_changed = Signal(bool)  # Toggle for showing all ROI outlines
+    roi_id_changed = Signal(int, str)  # ROI ID changed (index, new_id)
     view_mode_changed = Signal(ViewMode)
     edit_mode_changed = Signal(EditMode)
     image_changed = Signal()  # Underlying image data changed
@@ -60,6 +66,8 @@ class AppState(QObject):
         super().__init__(parent)
         # Multi-ROI storage
         self._rois: list[ROI] = []  # List of committed ROIs
+        self._roi_ids: List[str] = []  # List of ROI IDs (parallel to _rois)
+        self._persist_ids: bool = False  # Whether to save IDs to file
         self._current_roi_index: int = -1  # -1 means no ROI selected
         self._show_all_rois: bool = False
 
@@ -93,6 +101,20 @@ class AppState(QObject):
     @property
     def n_rois(self) -> int:
         return len(self._rois)
+
+    @property
+    def roi_ids(self) -> List[str]:
+        """List of ROI IDs (parallel to rois list)."""
+        return self._roi_ids
+
+    @property
+    def persist_ids(self) -> bool:
+        """Whether ROI IDs should be saved to file."""
+        return self._persist_ids
+
+    def set_persist_ids(self, persist: bool):
+        """Set whether ROI IDs should be saved to file."""
+        self._persist_ids = persist
 
     @property
     def current_roi_index(self) -> int:
@@ -148,10 +170,18 @@ class AppState(QObject):
         self.roi_changed.emit()
         self.candidate_changed.emit()
 
-    def add_roi(self, roi: ROI) -> int:
-        """Add a new ROI to the list and return its index."""
+    def add_roi(self, roi: ROI, roi_id: Optional[str] = None) -> int:
+        """Add a new ROI to the list and return its index.
+
+        Args:
+            roi: The ROI to add.
+            roi_id: Optional ID for the ROI. If None, auto-generates "ROI n".
+        """
         self._rois.append(roi)
         index = len(self._rois) - 1
+        if roi_id is None:
+            roi_id = f"ROI {index + 1}"
+        self._roi_ids.append(roi_id)
         self.roi_list_changed.emit()
         return index
 
@@ -164,6 +194,7 @@ class AppState(QObject):
         """Remove ROI at index."""
         if 0 <= index < len(self._rois):
             self._rois.pop(index)
+            self._roi_ids.pop(index)
 
             # Adjust current index
             if self._current_roi_index == index:
@@ -176,6 +207,18 @@ class AppState(QObject):
                 self._current_roi_index -= 1
 
             self.roi_list_changed.emit()
+
+    def rename_roi(self, index: int, new_id: str):
+        """Rename an ROI and enable ID persistence.
+
+        Args:
+            index: Index of the ROI to rename.
+            new_id: New ID string for the ROI.
+        """
+        if 0 <= index < len(self._roi_ids):
+            self._roi_ids[index] = new_id
+            self._persist_ids = True  # User manually set an ID, so persist
+            self.roi_id_changed.emit(index, new_id)
 
     def new_empty_roi(self):
         """Create a new empty ROI and switch to it."""

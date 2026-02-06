@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, List
 import numpy as np
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QObject
@@ -35,6 +35,7 @@ class Autosaver(QObject):
         # Connect to relevant signals
         self.state.roi_changed.connect(self._request_save)
         self.state.roi_list_changed.connect(self._request_save)
+        self.state.roi_id_changed.connect(self._request_save)
 
     def _request_save(self):
         self._debouncer.request()
@@ -50,7 +51,10 @@ class Autosaver(QObject):
         if self.state.data_source is not None:
             shape = self.state.data_source.shape[:2]
 
-        collection = ROICollection(rois=list(rois))
+        # Only include IDs if persist_ids is enabled
+        ids = list(self.state.roi_ids) if self.state.persist_ids else None
+
+        collection = ROICollection(rois=list(rois), ids=ids)
         collection.save(self.output_path, shape=shape)
 
 
@@ -58,6 +62,8 @@ def launch(
     data: Union[np.ndarray, "SVDVideo", str, Path],  # type: ignore
     output_path: Optional[Union[str, Path]] = None,
     roi: Optional[ROI] = None,
+    roi_collection: Optional[Union[str, Path, ROICollection]] = None,
+    ids: Optional[List[str]] = None,
     n_components: Optional[int] = None,
     tmin: Optional[int] = None,
     tmax: Optional[int] = None,
@@ -73,6 +79,10 @@ def launch(
         output_path: Path to save ROI data. Format determined by extension
                      (.npz, .mat, .h5). Autosave enabled if provided.
         roi: Optional initial ROI to display/edit.
+        roi_collection: Optional ROICollection or path to .mat/.npz/.h5 file
+                        containing ROIs to load.
+        ids: Optional list of ROI IDs. If provided, enables ID persistence.
+             IDs from roi_collection take precedence if both are given.
         n_components: Number of SVD components to use. If None, auto-selected.
         tmin: Start frame index (inclusive). If None, starts at 0.
         tmax: End frame index (exclusive). If None, uses all frames.
@@ -119,11 +129,42 @@ def launch(
         data_source = data
     else:
         raise TypeError(f"Unsupported data type: {type(data)}")
-    
-    print("spatial", data_source._U.shape, "temporal", data_source._u.shape)
 
     state.set_data_source(data_source)
 
+    # Handle ROI collection input
+    loaded_ids = None
+    if roi_collection is not None:
+        if isinstance(roi_collection, (str, Path)):
+            roi_collection = ROICollection.load(roi_collection)
+        # Load ROIs from collection
+        for i, loaded_roi in enumerate(roi_collection.rois):
+            roi_id = None
+            if roi_collection.ids is not None and i < len(roi_collection.ids):
+                roi_id = roi_collection.ids[i]
+            # Convert loaded timeseries.roi to roigui.roi.ROI
+            gui_roi = ROI(
+                footprint=loaded_roi.footprint,
+                weights=loaded_roi.weights,
+                code=loaded_roi.code
+            )
+            state.add_roi(gui_roi, roi_id=roi_id)
+        loaded_ids = roi_collection.ids
+        if state.n_rois > 0:
+            state.set_current_roi_index(0)
+
+    # Handle explicit IDs parameter (only if not loaded from collection)
+    if ids is not None and loaded_ids is None:
+        # Apply provided IDs to existing ROIs
+        for i, roi_id in enumerate(ids):
+            if i < len(state._roi_ids):
+                state._roi_ids[i] = roi_id
+        state._persist_ids = True
+    elif loaded_ids is not None:
+        # IDs came from collection, enable persistence
+        state._persist_ids = True
+
+    # Handle single ROI input (legacy)
     if roi is not None:
         state.set_roi(roi)
 

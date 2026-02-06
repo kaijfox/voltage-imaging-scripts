@@ -154,6 +154,7 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.state.show_all_rois_changed.connect(self._on_show_all_changed)
         self.state.roi_list_changed.connect(self._on_roi_list_changed)
         self.state.current_roi_index_changed.connect(self._on_roi_list_changed)
+        self.state.roi_id_changed.connect(self._on_roi_id_changed)
 
         # Enable mouse tracking for editing
         self.scene().sigMouseClicked.connect(self._on_mouse_clicked)
@@ -236,6 +237,11 @@ class ImageView(pg.GraphicsLayoutWidget):
         if self.state.show_all_rois:
             self._update_other_roi_outlines()
 
+    def _on_roi_id_changed(self, index: int, new_id: str):
+        """Update labels when an ROI ID changes."""
+        if self.state.show_all_rois:
+            self._update_other_roi_outlines()
+
     def _update_other_roi_outlines(self):
         """Rebuild outlines and labels for all ROIs in Show All mode."""
         from .roi import ROIGeometry
@@ -254,6 +260,7 @@ class ImageView(pg.GraphicsLayoutWidget):
 
         # Create outlines and labels for all ROIs
         current_idx = self.state.current_roi_index
+        roi_ids = self.state.roi_ids
         for i, roi in enumerate(self.state.rois):
             if len(roi.footprint) == 0:
                 continue
@@ -263,9 +270,12 @@ class ImageView(pg.GraphicsLayoutWidget):
             # Note: image coords are (row, col) but pyqtgraph uses (x=col, y=row)
             label_x, label_y = centroid[1], centroid[0]
 
+            # Get display text (use ID if available, otherwise index)
+            label_text = roi_ids[i] if i < len(roi_ids) else str(i + 1)
+
             # Create label
             label = pg.TextItem(
-                text=str(i + 1),
+                text=label_text,
                 color="white" if i != current_idx else "yellow",
                 anchor=(0.5, 0.5),
             )
@@ -881,7 +891,7 @@ class ROISelectorSection(QFrame):
         self.roi_combo.currentIndexChanged.connect(self._on_combo_changed)
         layout.addWidget(self.roi_combo)
 
-        # Button row
+        # Button row 1: New, Propose
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(4)
 
@@ -908,6 +918,18 @@ class ROISelectorSection(QFrame):
 
         layout.addLayout(btn_layout)
 
+        # Button row 2: Rename
+        btn_layout2 = QHBoxLayout()
+        btn_layout2.setSpacing(4)
+
+        self.btn_rename = QPushButton("Rename")
+        self.btn_rename.setStyleSheet(self.btn_new.styleSheet())
+        self.btn_rename.clicked.connect(self._on_rename_clicked)
+        btn_layout2.addWidget(self.btn_rename)
+        btn_layout2.addStretch()
+
+        layout.addLayout(btn_layout2)
+
         # Show All toggle
         from PySide6.QtWidgets import QCheckBox
 
@@ -926,6 +948,7 @@ class ROISelectorSection(QFrame):
         self.state.roi_list_changed.connect(self._update_combo)
         self.state.current_roi_index_changed.connect(self._on_roi_index_changed)
         self.state.show_all_rois_changed.connect(self._on_show_all_state_changed)
+        self.state.roi_id_changed.connect(self._on_roi_id_changed)
 
         self._update_combo()
 
@@ -933,8 +956,11 @@ class ROISelectorSection(QFrame):
         """Rebuild combo box from ROI list."""
         self.roi_combo.blockSignals(True)
         self.roi_combo.clear()
+        roi_ids = self.state.roi_ids
         for i in range(len(self.state.rois)):
-            self.roi_combo.addItem(f"ROI {i+1}")
+            # Use ID if available, otherwise fall back to "ROI n"
+            label = roi_ids[i] if i < len(roi_ids) else f"ROI {i + 1}"
+            self.roi_combo.addItem(label)
         if self.state.current_roi_index >= 0:
             self.roi_combo.setCurrentIndex(self.state.current_roi_index)
         self.roi_combo.blockSignals(False)
@@ -952,6 +978,25 @@ class ROISelectorSection(QFrame):
 
     def _on_new_clicked(self):
         self.state.new_empty_roi()
+
+    def _on_rename_clicked(self):
+        """Open dialog to rename current ROI."""
+        from PySide6.QtWidgets import QInputDialog
+
+        index = self.state.current_roi_index
+        if index < 0:
+            return
+
+        current_id = self.state.roi_ids[index] if index < len(self.state.roi_ids) else f"ROI {index + 1}"
+        new_id, ok = QInputDialog.getText(
+            self, "Rename ROI", "Enter new name:", text=current_id
+        )
+        if ok and new_id.strip():
+            self.state.rename_roi(index, new_id.strip())
+
+    def _on_roi_id_changed(self, index: int, new_id: str):
+        """Update combo box when ROI ID changes."""
+        self._update_combo()
 
     def _on_propose_clicked(self):
         """Find peak in current image not in any ROI, extend, enter refine."""
