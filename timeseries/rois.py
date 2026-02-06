@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, Optional, Mapping, ClassVar, List, Sequence
 from pathlib import Path
 import os
+import itertools
 import numpy as np
 
 
@@ -350,6 +351,7 @@ class ROICollection:
 class HierarchicalId:
     parts: Tuple[str, ...]
     meta: Optional[Mapping] = None
+    _is_hid: ClassVar[bool] = True
 
     @classmethod
     def from_string(cls, s: str):
@@ -376,13 +378,21 @@ class HierarchicalId:
             and other.parts[: len(self.parts)] == self.parts
         )
 
+    def repr_in_tree(self) -> str:
+        """Return string representation suitable for tree display."""
+        return str(self)
+
 
 @dataclass(frozen=True)
 class ProcessROIId(HierarchicalId):
     ROOT: ClassVar[str] = "soma"
-    NODE: ClassVar[str] = "branch"
-    ROOT_SHORT: ClassVar[str] = "s"
-    NODE_SHORT: ClassVar[str] = "b"
+    NODE: ClassVar[List[str]] = ["branch"]
+    DEFAULT: ClassVar[str] = "unk"
+    SHORT: ClassVar[dict[str, str]] = {
+        "soma": "s",
+        "branch": "b",
+        "unk": "u",
+    }
     SEP: ClassVar[str] = "."
 
     @classmethod
@@ -394,32 +404,30 @@ class ProcessROIId(HierarchicalId):
         if not len(parts):
             raise ValueError("ProcessROIId string must contain a valid part")
 
-        # Infer kind or error if not specified
-        if parts[-1].startswith(cls.ROOT_SHORT) or parts[-1].startswith(cls.ROOT):
-            kind = cls.ROOT
-        elif parts[-1].startswith(cls.NODE_SHORT) or parts[-1].startswith(cls.NODE):
-            kind = cls.NODE
-        elif len(parts) > 1:
-            # Infer kind=node if multiple parts and no prefix on last part
-            kind = cls.NODE
-        else:
-            raise ValueError(
-                f"Depth-1 {cls.__name__} must have prefix, one of",
-                f"({cls.ROOT_SHORT}, {cls.ROOT}, {cls.NODE_SHORT}, {cls.NODE})",
-            )
+        # Check for kind prefix on last part
+        kind = None
+        kinds = [cls.ROOT, cls.DEFAULT] + cls.NODE + list(cls.SHORT.values())
+        for k in kinds:
+            if parts[-1].startswith(k):
+                kind = k
+        # Convert short kind to full name
+        if kind in cls.SHORT.values():
+            kind = next(long for long, short in cls.SHORT.items() if short == kind)
+        # DEFAULT kind if none found
+        if kind is None:
+            kind = cls.DEFAULT
 
-        # Remove kind prefixes
+        # Remove kind prefixes to get ids
         remove = lambda k: lambda p: p if not p.startswith(k) else p[len(k) :]
-        parts = filter(remove(cls.ROOT), parts)
-        parts = filter(remove(cls.NODE), parts)
-        parts = filter(remove(cls.ROOT_SHORT), parts)
-        parts = filter(remove(cls.NODE_SHORT), parts)
+        for k in [cls.ROOT, cls.DEFAULT] + cls.NODE:
+            parts = tuple(map(remove(k), parts))
+            parts = tuple(map(remove(cls.SHORT[k]), parts))
         parts = tuple(parts)
 
         return cls(parts=parts, meta={"kind": kind})
 
-    @staticmethod
-    def resolve_kind(all_ids, parts):
+    @classmethod
+    def resolve_kind(cls, all_ids, parts):
         if all_ids is None:
             return None
         for it in all_ids:
@@ -429,7 +437,7 @@ class ProcessROIId(HierarchicalId):
                 else ProcessROIId.from_string(str(it))
             )
             if pid.parts == parts:
-                return (pid.meta or {}).get("kind")
+                return (pid.meta or {}).get("kind", cls.DEFAULT)
         return None
 
     def short(self, all_ids: Sequence["ProcessROIId"] = None) -> str:
@@ -442,17 +450,20 @@ class ProcessROIId(HierarchicalId):
         for i in range(len(self.parts)):
 
             p = self.parts[: i + 1]
-            if i == len(self.parts) - 1:
-                prefix = ProcessROIId.resolve_kind(all_ids, p) or ""
+            if i < len(self.parts) - 1:
+                prefix = ""
+                if all_ids is not None:
+                    prefix = ProcessROIId.resolve_kind(all_ids, p) or self.DEFAULT
+                prefix = ProcessROIId.SHORT.get(prefix, prefix)
             else:
-                prefix = self.meta.get("kind", "")
-            prefix = self.ROOT_SHORT if prefix == self.ROOT else prefix
-            prefix = self.NODE_SHORT if prefix == self.NODE else prefix
+                prefix = self.meta.get("kind", self.DEFAULT)
+                prefix = ProcessROIId.SHORT.get(prefix, prefix)
+
             out.append(f"{prefix}{self.parts[i]}")
 
         return self.SEP.join(out)
 
-    def long(self, all_ids: Sequence["ProcessROIId"]) -> str:
+    def long(self, all_ids: Sequence["ProcessROIId"] = None) -> str:
         """Return longform string representation; when provided, use kinds from
         all_ids for parents."""
         if "kind" not in (self.meta or {}):
@@ -462,13 +473,22 @@ class ProcessROIId(HierarchicalId):
         for i in range(len(self.parts)):
 
             p = self.parts[: i + 1]
-            if i == len(self.parts) - 1:
-                prefix = ProcessROIId.resolve_kind(all_ids, p) or ""
+            if i < len(self.parts) - 1:
+                prefix = ""
+                if all_ids is not None:
+                    prefix = ProcessROIId.resolve_kind(all_ids, p) or self.DEFAULT
             else:
                 prefix = self.meta.get("kind", "")
             out.append(f"{prefix}{self.parts[i]}")
 
         return self.SEP.join(out)
+    
+    def __str__(self):
+        return self.short()
+
+    def repr_in_tree(self) -> str:
+        """Return string representation suitable for tree display."""
+        return self.SEP + self.meta.get("kind", self.DEFAULT) + str(self.parts[-1])
 
 
 class ROIHierarchy:
@@ -484,24 +504,24 @@ class ROIHierarchy:
         for it in ids:
             hid = (
                 it
-                if isinstance(it, HierarchicalId)
+                if hasattr(it, "_is_hid") and it._is_hid
                 else HierarchicalId.from_string(str(it))
             )
             hlist.append(hid)
 
         self._hids = hlist
         # canonical string keys
-        self._keys = [str(h) for h in self._hids]
+        self._keys = [self._key(h) for h in self._hids]
         self._id_to_index = {k: idx for idx, k in enumerate(self._keys)}
 
         self._children = {k: [] for k in self._keys}
         self._parent = {}
 
         for h in self._hids:
-            k = str(h)
+            k = self._key(h)
             p = h.parent()
-            if p is not None and str(p) in self._children:
-                pk = str(p)
+            if p is not None and self._key(p) in self._children:
+                pk = self._key(p)
                 self._parent[k] = pk
                 self._children[pk].append(k)
             else:
@@ -510,21 +530,46 @@ class ROIHierarchy:
         self._roots = [k for k, p in self._parent.items() if p is None]
 
     @classmethod
-    def from_collection(cls, coll):
+    def from_collection(cls, coll, hid_type=HierarchicalId):
         ids = getattr(coll, "ids", None)
         if ids is None:
             raise ValueError("collection has no ids")
-        return cls(ids)
+        hids = []
+        for i in ids:
+            if isinstance(i, str):
+                hid = hid_type.from_string(str(i))
+                hids.append(hid)
+            elif isinstance(i, HierarchicalId):
+                hids.append(i)
+            else:
+                raise ValueError("ids must be str or HierarchicalId")
+        return cls(hids)
 
     def _to_hid(self, id_or_str):
-        return (
-            id_or_str
-            if isinstance(id_or_str, HierarchicalId)
-            else HierarchicalId.from_string(str(id_or_str))
-        )
+        if hasattr(id_or_str, "_is_hid") and id_or_str._is_hid:
+            return id_or_str
+        elif isinstance(id_or_str, tuple):
+            try:
+                return next(
+                    h
+                    for h in self._hids
+                    if id_or_str == h.parts
+                )
+            except StopIteration:
+                raise ValueError(f"Unknown id: {id_or_str}")
+
+        else:
+            try:
+                return next(
+                    h
+                    for h in self._hids
+                    if type(h).from_string(id_or_str).parts == h.parts
+                )
+            except StopIteration:
+                raise ValueError(f"Unknown id: {id_or_str}")
 
     def _key(self, id_or_str):
-        return str(self._to_hid(id_or_str))
+        return self._to_hid(id_or_str).parts
 
     @property
     def ids(self):
@@ -582,22 +627,75 @@ class ROIHierarchy:
                 stack.append(c)
         return out
 
-    def color_greedy(self):
-        """Adjacent (parent-child) coloring. Forest -> 2 colors (0/1) via DFS.
+    def color_greedy(self, colors=None):
+        """Adjacent (parent-child) coloring.
 
         Returns mapping from canonical id string -> color int.
         """
-        colors = {}
-        for root in self._roots:
-            if root in colors:
-                continue
-            stack = [(root, 0)]
+        if colors is None:
+            import matplotlib.pyplot as plt
+            colors = plt.cm.get_cmap("tab10").colors
+
+        # make colors an infinite iterator
+        colors = itertools.cycle(colors)
+
+        # Set up for search
+        node_colors = {}
+        visited = set()
+
+        for i_root, root in enumerate(self._roots):
+            # Invariant: if a node is in the stack, it has a color
+            node_colors[root] = next(colors)
+            stack = [root]
+            # BFS
             while stack:
-                node, col = stack.pop()
-                if node in colors:
+                node = stack.pop()
+                # Invariant if node in visited, its children have been stacked
+                if node in visited:
                     continue
-                colors[node] = col
+                visited.add(node)
+
+                # Bypass parent color if we made it back to that point in the
+                # cycle
+                color = next(colors)
+                if node_colors[node] == color:
+                    color = next(colors)
                 for c in self._children.get(node, []):
-                    if c not in colors:
-                        stack.append((c, 1 - col))
-        return colors
+                    stack.append(c)
+                    node_colors[c] = color
+                    color = next(colors)
+        return node_colors
+
+    def iter_topological(self, as_hid: bool = False):
+        """Yield nodes in parent-before-children order using an explicit stack (DFS).
+
+        If as_hid is True, yield HierarchicalId objects; otherwise yield canonical
+        string ids.
+        """
+        visited = set()
+        # Initialize stack so that roots are visited in the order of self._roots
+        stack = list(reversed(self._roots))
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            yield self._to_hid(node) if as_hid else node
+            # push children so that the first child is processed first
+            children = list(self._children.get(node, []))
+            for c in reversed(children):
+                if c not in visited:
+                    stack.append(c)
+
+    def sorted_ids(self):
+        """Return list of ids in topological (parent-before-children) order."""
+        return list(self.iter_topological(as_hid=False))
+
+    def __repr__(self):
+        """Multi-line representation: topologically-sorted ids with indentation by depth."""
+        lines = []
+        for hid in self.iter_topological(as_hid=True):
+            depth = hid.depth()
+            indent = "  " * (depth - 1)
+            lines.append(f"{indent}{hid.repr_in_tree()}")
+        return "\n".join(lines)

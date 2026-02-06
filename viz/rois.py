@@ -208,11 +208,11 @@ def overlay_rois(
                 else np.array([0, 0])
             )
             # default text kwargs; allow text_kws to override
-            txt_defaults = {"color": "k", "fontsize": 10}
+            txt_defaults = {"color": color, "fontsize": 10}
             txt_kwargs = {**txt_defaults, **text_kws}
             text = ax.text(centroid[1], centroid[0], name, **txt_kwargs)
             # default stroke kwargs; allow stroke_kws to override
-            stroke_defaults = {"linewidth": 1, "foreground": "white"}
+            stroke_defaults = {"linewidth": 0.5, "foreground": "white"}
             stroke_kwargs = {**stroke_defaults, **stroke_kws}
             text.set_path_effects([Stroke(**stroke_kwargs), Normal()])
 
@@ -224,6 +224,8 @@ def display_rois(
     fig: Optional[plt.Figure] = None,
     axis: Optional[plt.Axes] = None,
     dpi: Optional[float] = None,
+    names: Optional[Sequence[str]] = None,
+    colors: Optional[Sequence[Any]] = None,
     boundary_kws: Optional[Dict[str, Any]] = None,
     text_kws: Optional[Dict[str, Any]] = None,
     stroke_kws: Optional[Dict[str, Any]] = None,
@@ -273,7 +275,9 @@ def display_rois(
         ax.set_axis_off()
 
     # 4. overlay ROIs
-    names, colors = _infer_names_and_colors(roi_collection)
+    inferred_names, inferred_colors = _infer_names_and_colors(roi_collection)
+    names = names or inferred_names
+    colors = colors or inferred_colors
     overlay_rois(
         roi_collection,
         names,
