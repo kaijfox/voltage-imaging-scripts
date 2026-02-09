@@ -88,7 +88,7 @@ class ROICollection:
     image_shape: Optional[Tuple[int, int]] = None  # Set when loaded from .mat
     ids: Optional[List[str]] = None
     ids_short: Optional[List[str]] = None
-    colors: Optional[List[Tuple[int, int, int]]] = None
+    colors: Optional[np.ndarray] = None
 
     def save(self, path: os.PathLike, shape: Optional[Tuple[int, int]] = None):
         """Save all ROIs to output file."""
@@ -106,19 +106,147 @@ class ROICollection:
             shape = shape or self.image_shape
             if shape is None:
                 raise ValueError("shape required for .mat format")
-            self._save_mat(path, self.rois, shape, ids=self.ids)
+            self._save_mat(path, self.rois, shape, ids=self.ids, colors=self._standardize_colors_for_saving())
         elif ext == ".h5":
             self._save_h5(
-                path, footprints, weights, codes, ids=self.ids, ids_short=self.ids_short
+                path,
+                footprints,
+                weights,
+                codes,
+                ids=self.ids,
+                ids_short=self.ids_short,
+                colors=self._standardize_colors_for_saving(),
             )
         else:
             # Default to npz
             self._save_npz(
-                path, footprints, weights, codes, ids=self.ids, ids_short=self.ids_short
+                path,
+                footprints,
+                weights,
+                codes,
+                ids=self.ids,
+                ids_short=self.ids_short,
+                colors=self._standardize_colors_for_saving(),
             )
 
+    def _standardize_colors_for_saving(self):
+        """Return colors as an (n_rois,3) numpy array or None."""
+        if self.colors is None:
+            return None
+        arr = np.asarray(self.colors)
+        if arr.size == 0:
+            return None
+        arr = np.asarray(arr, dtype=float)
+        if arr.ndim == 1 and arr.size == 3:
+            arr = arr.reshape(1, 3)
+        if arr.ndim == 2 and arr.shape[1] == 3:
+            return arr
+        # Try to reshape if flat
+        try:
+            arr = arr.reshape(-1, 3)
+            return arr
+        except Exception:
+            raise ValueError("colors must be convertible to an (N,3) array")
+
+    def __getitem__(self, key) -> "ROICollection":
+        """Subset ROICollection by int, str, slice or lists — always returns a new ROICollection.
+
+        - int: return collection with single ROI
+        - str: match against `ids` first, then `ids_short`; raise ValueError if both id lists are None
+        - slice: same as slicing lists
+        - list of int or list of str: return corresponding subset
+        """
+        # single int
+        if isinstance(key, int):
+            return ROICollection(
+                rois=[self.rois[key]],
+                image_shape=self.image_shape,
+                ids=[self.ids[key]] if self.ids is not None else None,
+                ids_short=[self.ids_short[key]] if self.ids_short is not None else None,
+                colors=(None if self.colors is None else np.asarray(self.colors)[[key]]),
+            )
+
+        # single str
+        if isinstance(key, str):
+            if self.ids is None and self.ids_short is None:
+                raise ValueError("Cannot index ROICollection by string: no ids available")
+            # prefer ids
+            if self.ids is not None and key in self.ids:
+                idx = self.ids.index(key)
+            elif self.ids_short is not None and key in self.ids_short:
+                idx = self.ids_short.index(key)
+            else:
+                raise ValueError(f"id '{key}' not found in ids or ids_short")
+            return ROICollection(
+                rois=[self.rois[idx]],
+                image_shape=self.image_shape,
+                ids=[self.ids[idx]] if self.ids is not None else None,
+                ids_short=[self.ids_short[idx]] if self.ids_short is not None else None,
+                colors=(None if self.colors is None else np.asarray(self.colors)[[idx]]),
+            )
+
+        # slice
+        if isinstance(key, slice):
+            rois = self.rois[key]
+            ids = self.ids[key] if self.ids is not None else None
+            ids_short = self.ids_short[key] if self.ids_short is not None else None
+            colors = None
+            if self.colors is not None:
+                colors = np.asarray(self.colors)[key]
+            return ROICollection(
+                rois=list(rois),
+                image_shape=self.image_shape,
+                ids=list(ids) if ids is not None else None,
+                ids_short=list(ids_short) if ids_short is not None else None,
+                colors=(None if colors is None or len(colors) == 0 else np.asarray(colors)),
+            )
+
+        # list of ints
+        if isinstance(key, list) and all(isinstance(k, int) for k in key):
+            rois = [self.rois[k] for k in key]
+            ids = [self.ids[k] for k in key] if self.ids is not None else None
+            ids_short = [self.ids_short[k] for k in key] if self.ids_short is not None else None
+            colors = None
+            if self.colors is not None:
+                colors = np.asarray(self.colors)[key]
+            return ROICollection(
+                rois=rois,
+                image_shape=self.image_shape,
+                ids=ids,
+                ids_short=ids_short,
+                colors=(None if colors is None or len(colors) == 0 else np.asarray(colors)),
+            )
+
+        # list of strs
+        if isinstance(key, list) and all(isinstance(k, str) for k in key):
+            if self.ids is None and self.ids_short is None:
+                raise ValueError("Cannot index ROICollection by string list: no ids available")
+            indices = []
+            for k in key:
+                if self.ids is not None and k in self.ids:
+                    indices.append(self.ids.index(k))
+                elif self.ids_short is not None and k in self.ids_short:
+                    indices.append(self.ids_short.index(k))
+                else:
+                    raise ValueError(f"id '{k}' not found in ids or ids_short")
+            rois = [self.rois[i] for i in indices]
+            ids = [self.ids[i] for i in indices] if self.ids is not None else None
+            ids_short = [self.ids_short[i] for i in indices] if self.ids_short is not None else None
+            colors = None
+            if self.colors is not None:
+                colors = np.asarray(self.colors)[indices]
+            return ROICollection(
+                rois=rois,
+                image_shape=self.image_shape,
+                ids=ids,
+                ids_short=ids_short,
+                colors=(None if colors is None or len(colors) == 0 else np.asarray(colors)),
+            )
+
+        raise TypeError("ROICollection must be indexed by int, str, slice, or list of int/str")
+
     @staticmethod
-    def _save_npz(path, footprints, weights, codes, ids=None, ids_short=None):
+    def _save_npz(path, footprints, weights, codes, ids=None, ids_short=None, colors=None):
         """Save as numpy npz file."""
         import numpy as np
 
@@ -137,12 +265,13 @@ class ROICollection:
                 if ids_short is not None
                 else np.array([], dtype=object)
             ),
+            colors=(np.array(colors) if colors is not None else np.array([], dtype=float)),
             n_rois=len(footprints),
         )
 
     @staticmethod
     def _save_mat(
-        path, rois: List["ROI"], shape: Tuple[int, int], ids: Optional[List[str]] = None
+        path, rois: List["ROI"], shape: Tuple[int, int], ids: Optional[List[str]] = None, colors: Optional[np.ndarray] = None
     ):
         """Save as MATLAB mat file (SemiSeg-compatible).
 
@@ -168,17 +297,18 @@ class ROICollection:
                 if ids is not None:
                     roi_list[-1]["id"] = ids[len(roi_list) - 1]
 
-            savemat(
-                str(path),
-                {
-                    "roiList": (
-                        np.array(roi_list, dtype=object)
-                        if roi_list
-                        else np.array([], dtype=object)
-                    ),
-                    "image_shape": np.array(shape),
-                },
-            )
+            mat_dict = {
+                "roiList": (
+                    np.array(roi_list, dtype=object)
+                    if roi_list
+                    else np.array([], dtype=object)
+                ),
+                "image_shape": np.array(shape),
+            }
+            if colors is not None:
+                mat_dict["colors"] = np.asarray(colors)
+
+            savemat(str(path), mat_dict)
         except ImportError:
             print("scipy not available, falling back to npz")
             footprints = [r.footprint for r in rois]
@@ -189,7 +319,7 @@ class ROICollection:
             )
 
     @staticmethod
-    def _save_h5(path, footprints, weights, codes, ids=None, ids_short=None):
+    def _save_h5(path, footprints, weights, codes, ids=None, ids_short=None, colors=None):
         """Save as HDF5 file."""
         try:
             import h5py
@@ -214,6 +344,9 @@ class ROICollection:
                         data=np.array(ids_short, dtype=object).astype("S"),
                         dtype=string_dt,
                     )
+                if colors is not None:
+                    # store colors as an attribute for lightweight access
+                    f.attrs["colors"] = np.asarray(colors)
         except ImportError:
             print("h5py not available, falling back to npz")
             ROICollection._save_npz(
@@ -247,11 +380,17 @@ class ROICollection:
         codes = data["codes"]
         ids = data["ids"].tolist() if "ids" in data.files else None
         ids_short = data["ids_short"].tolist() if "ids_short" in data.files else None
+        colors = None
+        if "colors" in data.files:
+            c = data["colors"]
+            c = np.asarray(c)
+            if c.size > 0:
+                colors = c.reshape(-1, 3) if c.ndim == 1 else c
         rois = [
             ROI(footprint=fp, weights=w, code=c)
             for fp, w, c in zip(footprints, weights, codes)
         ]
-        return cls(rois=rois, ids=ids, ids_short=ids_short)
+        return cls(rois=rois, ids=ids, ids_short=ids_short, colors=colors)
 
     @classmethod
     def _load_mat(
@@ -320,7 +459,13 @@ class ROICollection:
         ids = ids if len(ids) > 0 else None
         ids_short = ids_short if len(ids_short) > 0 else None
 
-        return cls(rois=rois, image_shape=shape, ids=ids, ids_short=ids_short)
+        colors = None
+        if "colors" in data:
+            c = np.asarray(data["colors"])
+            if c.size > 0:
+                colors = c.reshape(-1, 3) if c.ndim == 1 else c
+
+        return cls(rois=rois, image_shape=shape, ids=ids, ids_short=ids_short, colors=colors)
 
     @classmethod
     def _load_h5(cls, path) -> "ROICollection":
@@ -329,6 +474,7 @@ class ROICollection:
         rois = []
         ids = None
         ids_short = None
+        colors = None
         with h5py.File(path, "r") as f:
             n_rois = f.attrs.get("n_rois", 0)
             for i in range(n_rois):
@@ -344,8 +490,16 @@ class ROICollection:
                 ids = [str(x) for x in f["ids"][:]]
             if "ids_short" in f:
                 ids_short = [str(x) for x in f["ids_short"][:]]
-        return cls(rois=rois, ids=ids, ids_short=ids_short)
-
+            # colors may be stored as attribute or dataset
+            if "colors" in f.attrs:
+                c = np.asarray(f.attrs["colors"])
+                if c.size > 0:
+                    colors = c.reshape(-1, 3) if c.ndim == 1 else c
+            elif "colors" in f:
+                c = np.asarray(f["colors"][:])
+                if c.size > 0:
+                    colors = c.reshape(-1, 3) if c.ndim == 1 else c
+        return cls(rois=rois, ids=ids, ids_short=ids_short, colors=colors)
 
 @dataclass(frozen=True)
 class HierarchicalId:
