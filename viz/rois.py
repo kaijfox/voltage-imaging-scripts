@@ -49,7 +49,7 @@ def _infer_names_and_colors(
         n = len(select_idx)
 
     # names
-    if getattr(roi_collection, "ids", None):
+    if getattr(roi_collection, "ids", None) is not None:
         names_all = list(roi_collection.ids)
     else:
         names_all = [f"ROI {i}" for i in range(len(roi_collection.rois))]
@@ -60,7 +60,7 @@ def _infer_names_and_colors(
         names = [names_all[i] for i in select_idx]
 
     # colors
-    if getattr(roi_collection, "colors", None):
+    if getattr(roi_collection, "colors", None) is not None:
         colors_all = list(roi_collection.colors)
     else:
         cmap = plt.get_cmap("tab10")
@@ -112,7 +112,6 @@ def gamma_correct(images: np.ndarray, target: float = 0.5) -> np.ndarray:
 
     Steps kept as pseudocode comments in the function body.
     """
-    # 1. Normalize each image [0, 1]
     img = np.asarray(images)
     orig_shape = img.shape
     if img.ndim == 2:
@@ -124,6 +123,7 @@ def gamma_correct(images: np.ndarray, target: float = 0.5) -> np.ndarray:
     eps = 1e-12
 
     for i, im in enumerate(imgs):
+        # 1. Normalize each image [0, 1]
         minv = float(np.nanmin(im))
         maxv = float(np.nanmax(im))
         if maxv - minv < eps:
@@ -171,7 +171,8 @@ def overlay_rois(
         provided here override the defaults used for color and linewidth.
     text_kws : dict, optional
         Additional kwargs forwarded to ``ax.text``. Keys provided here override
-        the default color/fontsize.
+        the default color/fontsize. Optionally may contain do_text: bool
+        (default True) to disable text labels.
     stroke_kws : dict, optional
         Additional kwargs forwarded to matplotlib.patheffects.Stroke used for
         the text outline. Keys provided here override the default linewidth/
@@ -183,6 +184,9 @@ def overlay_rois(
     boundary_kws = {} if boundary_kws is None else dict(boundary_kws)
     text_kws = {} if text_kws is None else dict(text_kws)
     stroke_kws = {} if stroke_kws is None else dict(stroke_kws)
+
+    text_artists = {}
+    line_artists = {}
 
     # For each ROI
     for i, roi in enumerate(roi_collection.rois):
@@ -201,20 +205,170 @@ def overlay_rois(
             lc_kwargs = {**lc_defaults, **boundary_kws}
             lines = LineCollection(coords[:, :, ::-1], **lc_kwargs)
             ax.add_collection(lines)
-            # place label at centroid
-            centroid = (
-                roi.footprint.mean(axis=0)
-                if len(roi.footprint) > 0
-                else np.array([0, 0])
-            )
-            # default text kwargs; allow text_kws to override
-            txt_defaults = {"color": color, "fontsize": 10}
-            txt_kwargs = {**txt_defaults, **text_kws}
-            text = ax.text(centroid[1], centroid[0], name, **txt_kwargs)
-            # default stroke kwargs; allow stroke_kws to override
-            stroke_defaults = {"linewidth": 0.5, "foreground": "white"}
-            stroke_kwargs = {**stroke_defaults, **stroke_kws}
-            text.set_path_effects([Stroke(**stroke_kwargs), Normal()])
+            line_artists[i] = lines
+            if text_kws.get("do_text", True) is True:
+                # place label at centroid
+                centroid = (
+                    roi.footprint.mean(axis=0)
+                    if len(roi.footprint) > 0
+                    else np.array([0, 0])
+                )
+                # default text kwargs; allow text_kws to override
+                txt_defaults = {"color": color, "fontsize": 10}
+                txt_kwargs = {**txt_defaults, **text_kws}
+                text = ax.text(centroid[1], centroid[0], name, **txt_kwargs)
+                # default stroke kwargs; allow stroke_kws to override
+                stroke_defaults = {"linewidth": 0.5, "foreground": "white"}
+                stroke_kwargs = {**stroke_defaults, **stroke_kws}
+                text.set_path_effects([Stroke(**stroke_kwargs), Normal()])
+                text_artists[i] = text
+
+    return text_artists, line_artists
+
+
+def apply_cmap(
+    video: np.ndarray,
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    mode: str = "absolute",
+) -> np.ndarray:
+    """Apply colormap to monochrome (T,H,W) video. Returns (T,H,W,4) RGBA float.
+
+    mode: 'absolute' (min/max) or 'centered' (+/- max(abs)).
+    """
+    # 1. compute vmin, vmax from mode
+    # 2. normalize to [0,1] with clip
+    # 3. apply plt.get_cmap(cmap) over flattened array, reshape back
+    vid = np.asarray(video)
+
+    # Accept single-frame (H,W) as convenience
+    added_axis = False
+    if vid.ndim == 2:
+        vid = vid[None, ...]
+        added_axis = True
+
+    if vid.ndim != 3:
+        raise ValueError("apply_cmap expects a monochrome video of shape (T,H,W)")
+
+    # compute vmin/vmax
+    if mode == "absolute":
+        vmin = vmin or float(np.nanmin(vid))
+        vmax = vmax or float(np.nanmax(vid))
+    elif mode == "centered":
+        m = max(abs(float(np.nanmin(vid))), abs(float(np.nanmax(vid))))
+        vmin = vmin or -m
+        vmax = vmax or m
+    else:
+        raise ValueError("mode must be 'absolute' or 'centered'")
+
+    T, H, W = vid.shape
+
+    # Handle constant video: map to midpoint 0.5
+    eps = 1e-12
+    if vmax - vmin < eps:
+        norm = np.full((T, H, W), 0.5, dtype=float)
+    else:
+        norm = (vid.astype(float) - vmin) / (vmax - vmin)
+        np.clip(norm, 0.0, 1.0, out=norm)
+
+    # get colormap
+    cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, (str,)) else cmap
+
+    # apply colormap over flattened data and reshape to (T,H,W,4)
+    flat = norm.ravel()
+    rgba_flat = cmap_obj(flat)
+    rgba = rgba_flat.reshape((T, H, W, 4))
+
+    # Ensure float dtype
+    return rgba.astype(float)
+
+
+def setup_video(
+    video: np.ndarray,
+    ax: plt.Axes,
+    roi_collection: Optional[ROICollection] = None,
+    roi_kws: Optional[Dict[str, Any]] = None,
+    extent: Tuple[int, int, int, int] = None,
+) -> Tuple:
+    """Create imshow artist + update closure for FuncAnimation.
+
+    video: (T,H,W) monochrome or (T,H,W,3|4) color.
+    roi_kws: passed through to overlay_rois (keys: names, colors,
+             boundary_kws, text_kws, stroke_kws).
+    extent: tuple (left, right, bottom, top)
+        Rectangle where video should be displayed in data coords.
+    Returns (im_artist, update_fn) where update_fn(frame_idx) sets frame data.
+    """
+    # 1. imshow first frame; use cmap='gray' + clim for monochrome
+    # 2. ax.set_axis_off()
+    # 3. if roi_collection: infer names/colors, call overlay_rois
+    # 4. build update_fn closure: im.set_data(video[frame_idx])
+    vid = np.asarray(video)
+
+    if vid.ndim == 2:
+        # single frame -> treat as single-frame monochrome video
+        vid = vid[None, ...]
+
+    if vid.ndim == 3:
+        # monochrome (T,H,W)
+        mono = True
+    elif vid.ndim == 4 and vid.shape[-1] in (3, 4):
+        # color video (T,H,W,3|4)
+        mono = False
+    else:
+        raise ValueError("video must be shape (T,H,W) or (T,H,W,3|4)")
+
+    # Parse (left, right, bottom, top) from extent to imshow extent argument
+    imshow_extent = None
+    if extent is not None:
+        left, right, bottom, top = extent
+        imshow_extent = (left, right, bottom, top)
+
+    # display first frame
+    if mono:
+        # compute stable clim across video
+        vmin = float(np.nanmin(vid))
+        vmax = float(np.nanmax(vid))
+        im = ax.imshow(
+            vid[0],
+            cmap="gray",
+            origin="upper",
+            vmin=vmin,
+            vmax=vmax,
+            extent=imshow_extent,
+        )
+    else:
+        im = ax.imshow(vid[0], origin="upper", extent=imshow_extent)
+
+    ax.set_axis_off()
+
+    # overlay ROIs if provided
+    if roi_collection is not None:
+        inferred_names, inferred_colors = _infer_names_and_colors(roi_collection)
+        roi_kws = {} if roi_kws is None else dict(roi_kws)
+        names = roi_kws.pop("names", None) or inferred_names
+        colors = roi_kws.pop("colors", None) or inferred_colors
+        boundary_kws = roi_kws.pop("boundary_kws", None)
+        text_kws = roi_kws.pop("text_kws", None)
+        stroke_kws = roi_kws.pop("stroke_kws", None)
+
+        _, line_artists = overlay_rois(
+            roi_collection,
+            names,
+            ax,
+            colors,
+            boundary_kws=boundary_kws,
+            text_kws=text_kws,
+            stroke_kws=stroke_kws,
+        )
+
+    # update function
+    def update_fn(frame_idx: int):
+        im.set_data(vid[frame_idx])
+        return (im, *line_artists.values())
+
+    return im, update_fn
 
 
 def display_rois(
@@ -298,14 +452,30 @@ def display_traces(
     fig: Optional[plt.Figure] = None,
     axis: Optional[plt.Axes] = None,
     ticks: Optional[Sequence[float]] = None,
+    names: Optional[Sequence[str]] = None,
+    colors: Optional[Sequence[Any]] = None,
+    positions: Optional[Sequence[float]] = None,
+    scale_to: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Plot traces for a set of ROIs.
 
     select : list of indices or ids
 
+    Optional metadata arguments allow re-using positions/colors/names from a
+    previous call. If provided, the length of `names`, `colors`, or
+    `positions` must match the number of selected traces and a ValueError will
+    be raised otherwise.
+
+    If `scale_to` is provided each selected trace is scaled so its maximum
+    absolute value fits within +/- (scale_to / 2). Scaling is applied before
+    computing vertical spacing so the span/offset computation is consistent.
+
     Returns metadata dict with 'positions' (y positions), 'colors', and 'names'.
     """
     data = np.asarray(traces.data)
+    if scale_to is not None:
+        # make working float copy for potential scaling
+        data = data.astype(float, copy=True)
     n_cells, n_frames = data.shape
 
     # Convert select to indices
@@ -316,15 +486,44 @@ def display_traces(
         if (
             len(select) > 0
             and isinstance(select[0], str)
-            and getattr(roi_collection, "ids", None)
+            and getattr(roi_collection, "ids", None) is not None
         ):
             ids = list(roi_collection.ids)
             sel_idx = [ids.index(s) for s in select]
         else:
             sel_idx = list(select)
 
-    # Infer / default metadata
-    names, colors = _infer_names_and_colors(roi_collection, sel_idx)
+    # Optional scaling: scale each selected row by its max absolute value so that
+    # its amplitude fits within +/- (scale_to / 2).
+    if scale_to is not None:
+        if not (isinstance(scale_to, (int, float)) and scale_to > 0):
+            raise ValueError("'scale_to' must be a positive number")
+        half_range = float(scale_to) / 2.0
+        for i in sel_idx:
+            row = data[i]
+            max_abs = np.nanmax(np.abs(row))
+            if max_abs > 0:
+                factor = half_range / max_abs
+                data[i] = row * factor
+
+    # Infer / default metadata as needed
+    inferred_names, inferred_colors = _infer_names_and_colors(roi_collection, sel_idx)
+
+    # Resolve names
+    if names is None:
+        names_used = inferred_names
+    else:
+        if len(names) != len(sel_idx):
+            raise ValueError("length of 'names' must match number of selected traces")
+        names_used = list(names)
+
+    # Resolve colors
+    if colors is None:
+        colors_used = inferred_colors
+    else:
+        if len(colors) != len(sel_idx):
+            raise ValueError("length of 'colors' must match number of selected traces")
+        colors_used = list(colors)
 
     # fs/time axis
     if traces.fs is not None:
@@ -334,43 +533,55 @@ def display_traces(
         x = np.arange(n_frames)
         xlabel = "frame"
 
-    # Calculate a good vertical offset between the traces
-    spans = [np.nanmax(data[i]) - np.nanmin(data[i]) for i in sel_idx]
-    span = max(spans) if len(spans) > 0 else 1.0
-    offset = span * 1.2
+    # Calculate a good vertical offset between the traces unless positions provided
+    if positions is None:
+        spans = [2 * np.nanmax(np.abs(data[i])) for i in sel_idx]
+        span = max(spans) if len(spans) > 0 else 1.0
+        offset = span * 1.2
+        positions_used = [k * offset for k in range(len(sel_idx))]
+    else:
+        if len(positions) != len(sel_idx):
+            raise ValueError(
+                "length of 'positions' must match number of selected traces"
+            )
+        positions_used = list(positions)
 
     # Plot traces
     fig, ax = _ensure_axis(fig, axis)
-    positions = []
-    for k, (i, name, color) in enumerate(zip(sel_idx, names, colors)):
-        y = data[i] + k * offset
+    for k, i in enumerate(sel_idx):
+        name = names_used[k]
+        color = colors_used[k]
+        y = data[i] + positions_used[k]
         ax.plot(x, y, color=color)
-        positions.append(k * offset)
 
     # Labeled ticks around the traces & axis labels
     if ticks is not None:
         # Interleave trace label names with data coordinate ticks
         ticks = np.array(ticks, dtype=float)
-        if 0. not in ticks:
+        if 0.0 not in ticks:
             ticks = np.concatenate(([0.0], ticks))
         zero_idx = np.where(ticks == 0.0)[0][0]
-        tick_locations = np.array(positions)[None, :] + np.array(ticks)[:, None]
+        tick_locations = np.array(positions_used)[None, :] + np.array(ticks)[:, None]
         tick_labels = np.full(tick_locations.shape, "", dtype=object)
-        tick_labels[zero_idx, :] = names
+        tick_labels[zero_idx, :] = names_used
         # Flatten and sort
         tick_sort = np.argsort(tick_locations.ravel())
         tick_locations = tick_locations.ravel()[tick_sort]
         tick_labels = tick_labels.ravel()[tick_sort]
     else:
         # Only label trace ids
-        tick_locations = positions
-        tick_labels = names
+        tick_locations = positions_used
+        tick_labels = names_used
 
     ax.set_yticks(tick_locations)
     ax.set_yticklabels(tick_labels)
     ax.set_xlabel(xlabel)
 
-    return fig, ax, {"positions": positions, "colors": colors, "names": names}
+    return (
+        fig,
+        ax,
+        {"positions": positions_used, "colors": colors_used, "names": names_used},
+    )
 
 
 def display_events(
@@ -391,7 +602,7 @@ def display_events(
         if (
             len(select) > 0
             and isinstance(select[0], str)
-            and getattr(events, "ids", None)
+            and getattr(events, "ids", None) is not None
         ):
             ids = list(events.ids)
             sel_idx = [ids.index(s) for s in select]
@@ -419,26 +630,29 @@ def display_events(
             # sample y positions at integer frame indices (clip indices)
             idx = np.clip(spikes.astype(int), 0, y_trace.size - 1)
             yvals = y_trace[idx]
-            plot_kws = {**dict(
-                linestyle="None",
-                marker=".",
-                label=getattr(events, "ids", None) and events.ids[i],
-            ), **plot_kws}
-            ax.plot(
-                xvals,
-                yvals,
-                **plot_kws
-            )
+            plot_kws = {
+                **dict(
+                    linestyle="None",
+                    marker=".",
+                    label=getattr(events, "ids", None) is not None and events.ids[i],
+                ),
+                **plot_kws,
+            }
+            ax.plot(xvals, yvals, **plot_kws)
         elif trace_locations is not None:
             # events as vertical bars matching extent
             ymin, ymax = trace_locations[i]
             for xv in xvals:
                 ax.vlines(xv, ymin, ymax, **plot_kws)
         else:
-            plot_kws = {**dict(
-                linestyle="None", marker="|",
-                label=getattr(events, "ids", None) and events.ids[i],
-            ), **plot_kws}
+            plot_kws = {
+                **dict(
+                    linestyle="None",
+                    marker="|",
+                    label=getattr(events, "ids", None) is not None and events.ids[i],
+                ),
+                **plot_kws,
+            }
             # events as points on separate row
             y = -k  # separate row per ROI
             ax.plot(xvals, np.full_like(xvals, y), **plot_kws)
