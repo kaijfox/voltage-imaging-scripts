@@ -5,6 +5,112 @@ Vectorized functions on ragged arrays
 import numpy as np
 
 
+def ak_infer_shape(arr):
+    """
+    Infer a batch-style shape from an Awkward array-like object.
+
+    Returns a tuple where each entry is either an int (if that axis has the
+    same length for every element) or an Awkward array of counts for that axis
+    (if irregular). This mirrors the logic in the original snippets but is
+    defensive and easy to reuse.
+
+    Examples
+    --------
+    - Regular 2D ragged array -> (n_rows, n_cols)
+    - Irregular second axis -> (n_rows, counts_per_row)
+    """
+    import awkward as ak
+
+    # Fast path for numpy-like objects
+    if hasattr(arr, "shape") and getattr(arr, "ndim", None) is not None:
+        return arr.shape
+
+    shape = ()
+
+    # Determine number of axes; fall back to 1 if unknown
+    ndim = getattr(arr, "ndim", None)
+    if ndim is None:
+        try:
+            ndim = ak.ndim(arr)
+        except Exception:
+            ndim = 1
+
+    for i in range(int(ndim)):
+        counts = ak.num(arr, axis=i)
+
+        # Obtain a scalar representative for comparison (first element)
+        first = ak.flatten([counts], axis=None)
+        if len(first) == 0:
+            # empty shape
+            shape = shape + (0,)
+            continue
+        first = first[0]
+
+        # If every entry equals the first, return an int, else keep the counts array
+        try:
+            try:
+                all_eq = ak.all(counts == first)
+            except TypeError:
+                all_eq = np.all(counts == first)
+            
+            if all_eq:
+                shape = shape + (int(first),)
+            else:
+                shape = shape + (counts,)
+        except Exception as e:
+            # Conservative fallback when equality cannot be vectorized
+            shape = shape + (counts,)
+
+    return shape
+
+
+def ak_flatten_n_times(array, n, axis=-2, highlevel=False):
+    """
+    Flatten an Awkward array `n` times along `axis`.
+
+    This encapsulates the repeated flattening pattern from your snippet and
+    handles trivial cases (n <= 0) safely.
+    """
+    import awkward as ak
+
+    if n <= 0:
+        return array
+
+    out = array
+    for _ in range(int(n)):
+        out = ak.flatten(out, axis=axis, highlevel=highlevel)
+    return out
+
+
+def ak_unflatten_by_batch_shape(sampled_flat, ns, batch_shape, axis=0, highlevel=False):
+    """
+    Reconstruct a nested Awkward structure from a flattened `sampled_flat`.
+
+    - First unflatten by `ns` (total windows per outer product).
+    - Then unflatten repeatedly by entries of `batch_shape` (from the end
+      towards the front) so the final layout matches the original batch nesting.
+
+    Elements of `batch_shape` may be integers or Awkward arrays (irregular shapes).
+    """
+    import awkward as ak
+
+    sampled = ak.unflatten(sampled_flat, ns, axis=axis, highlevel=highlevel)
+
+    # Walk batch_shape from last (closest to window dimension) to first
+    # and unflatten progressively. Skip the last element because ns already
+    # accounts for the innermost split.
+    for tgt in reversed(batch_shape[:-1]):
+        # If target is an Awkward array, ensure it's flattened when needed
+        if hasattr(tgt, "ndim") and getattr(tgt, "ndim") > 0:
+            tgt_un = ak.flatten(tgt, axis=None, highlevel=highlevel)
+        else:
+            tgt_un = tgt
+
+        sampled = ak.unflatten(sampled, tgt_un, axis=axis, highlevel=highlevel)
+
+    return sampled
+
+
 def _nplike_is_jax(nplike):
     try:
         from awkward._nplikes.jax import Jax
@@ -701,3 +807,107 @@ def ak_reduce_1d(array, func, highlevel=True, behavior=None, attrs=None):
 
     out = ak._do.recursively_apply(layout, compute_apply)
     return ctx.wrap(out, highlevel=highlevel)
+
+
+
+def slice_by_events(trace_data, event_frames, n_pre, n_post):
+    """
+    trace_data: (*batch_shape, n_frames)
+    event_frames: (*batch_shape, <n_events>)
+    n_pre, n_post: int"""
+
+    import awkward as ak
+    import numpy as np
+
+    trace_data = ak.Array(trace_data)
+    events = ak.Array(event_frames)
+    if trace_data.ndim != events.ndim:
+        raise ValueError(
+            "trace_data and event_frames must have the same number of dimensions"
+        )
+    
+    # Ensure batch shapes are same
+    trace_data, events = ak.broadcast_arrays(
+        trace_data, events, depth_limit=trace_data.ndim - 1
+    )
+
+    # Extract generalized shape of trace (and therefore of batch dimensions)
+    shape = ()
+    if hasattr(trace_data, 'shape'):
+        shape = trace_data.shape
+    else:
+        for i in range(trace_data.ndim):
+            num = ak.num(trace_data, axis=i)
+            num_first = ak.flatten([num], axis=None)[0]
+            if np.all(num == num_first):
+                shape = shape + (num_first,)
+            else:
+                shape = shape + (num,)            
+
+    n_frames = shape[-1]
+    batch_shape = shape[:-1]
+
+    
+
+    # (*batch_shape, <n_events>, frames_per_window)
+    rel_times = np.arange(-n_pre, n_post + 1)
+    rel_times = rel_times[(None,) * len(batch_shape) + (None, slice(None))]
+    sample_ixs = events[..., None] + rel_times
+
+    # (*batch_shape, n_frames)
+    x = ak.from_regular(trace_data, highlevel=False)
+    # Flatten to only one batch dimension in x
+    for i in range(len(batch_shape) - 1):
+        x = ak.from_regular(ak.flatten(x, axis=-2, highlevel=False), highlevel=False)
+
+    starts = x.offsets.data[:-1]
+    ends = x.offsets.data[1:]
+    ns = ak.flatten(ak.num(sample_ixs, axis=-2), axis=None)
+    starts, ends = np.concatenate(
+        [np.broadcast_to([[s], [e]], (2, n)) for s, e, n in zip(starts, ends, ns)],
+        axis=1,
+    )
+    # ( prod(batch_shape) * n_total_windows, n_frames )
+    x = ak.contents.ListArray(
+        starts=ak.index.Index64(starts),
+        stops=ak.index.Index64(ends),
+        content=x.content,
+    )
+
+    # (batch_shape, <n_windows>, frames_per_window)
+    window_ixs = sample_ixs[:]
+    # ( prod(batch_shape) * n_total_windows, frames_per_window )
+    for i in range(len(batch_shape)):
+        window_ixs = ak.flatten(window_ixs, axis=-2, highlevel=False)
+    # window_ixs = ak.flatten(window_ixs, axis=-2, highlevel=False)
+    # convert window_ixs to ListOffsetArray
+    # for some reason indexing fails with regular layout
+    if isinstance(window_ixs, ak.contents.RegularArray):
+        window_ixs = ak.from_regular(window_ixs, axis=1, highlevel=False)
+
+
+    # Mark invalid indices (will be nan'ed post-hoc)
+    valid_ixs = (
+        (ak.highlevel.Array(window_ixs) >= 0) &
+        (ak.highlevel.Array(window_ixs) < n_frames)
+    ).layout
+    window_ixs = ak.where(valid_ixs, window_ixs, 0)
+
+    # Finally perform the indexing
+    sampled_flat = x[window_ixs]
+
+    # Remove samples from outside the window
+    # from_iter([None]) and [..., 0] required to avoid 'none propomotion disabled' error
+    sampled = ak.where(valid_ixs[..., None], sampled_flat, ak.from_iter([None]))[..., 0]
+
+    # Unflatten to original shapes
+    sampled = ak.unflatten(sampled_flat, ns, axis=0, highlevel=False)
+    for i in range(len(batch_shape) - 1):
+        tgt_shape = batch_shape[-i - 1]
+        # Flatten target shape up to last axis if irregular, to match flat `sampled`
+        if hasattr(tgt_shape, 'ndim') and tgt_shape.ndim > 0:
+            tgt_shape = ak.flatten(tgt_shape, axis=None)
+        sampled = ak.unflatten(sampled, tgt_shape, axis=0, highlevel=False)
+    sampled = ak.highlevel.Array(sampled)
+
+    return sampled
