@@ -2,6 +2,12 @@ from array_api_compat import array_namespace
 from pathlib import Path
 import os
 
+from ..cli.common import configure_logging
+
+
+logger, (error, warning, info, debug) = configure_logging("svd_video")
+
+
 def _parse_batch(*operators, n_core_dims):
     """
     Extract batch shape from operator(s), validate consistency, provide output reshaper.
@@ -174,18 +180,19 @@ class SVDVideo:
         import h5py
 
         path = str(Path(path))
-        with h5py.File(path, 'r') as f:
-            U = f['U'][:]
-            S = f['S'][:]
-            Vh = f['Vh'][:]
+        with h5py.File(path, "r") as f:
+            U = f["U"][:]
+            S = f["S"][:]
+            Vh = f["Vh"][:]
             orthonormal = f.attrs.get("orthonormal", False)
 
         if backend == "jax":
-            import jax.numpy as jnp #type: ignore
+            import jax.numpy as jnp  # type: ignore
+
             U, S, Vh = jnp.asarray(U), jnp.asarray(S), jnp.asarray(Vh)
 
         return cls(U, S, Vh, orthonormal=orthonormal)
-        
+
     def save(self, path: os.PathLike):
         """
         Save SVDVideo to HDF5 file.
@@ -206,14 +213,14 @@ class SVDVideo:
         S = np.asarray(self.S)
         Vh = np.asarray(self.Vt)
 
-        with h5py.File(path, 'w') as f:
-            f.create_dataset('U', data=U)
-            f.create_dataset('S', data=S)
-            f.create_dataset('Vh', data=Vh)
-            f.attrs['orthonormal'] = self.orthonormal
-            f.attrs['n_rows'] = U.shape[0]
-            f.attrs['n_inner'] = int(np.prod(Vh.shape[1:]))
-            f.attrs['dtype'] = str(U.dtype)
+        with h5py.File(path, "w") as f:
+            f.create_dataset("U", data=U)
+            f.create_dataset("S", data=S)
+            f.create_dataset("Vh", data=Vh)
+            f.attrs["orthonormal"] = self.orthonormal
+            f.attrs["n_rows"] = U.shape[0]
+            f.attrs["n_inner"] = int(np.prod(Vh.shape[1:]))
+            f.attrs["dtype"] = str(U.dtype)
 
     def __getitem__(self, idx):
         # If only indexed on time argument is a slice not a tuple
@@ -306,7 +313,7 @@ class SVDVideo:
             (
                 (kernel_sizes[sum(1 for a in axes if a < i + 1)] // 2,) * 2
                 if (i + 1) in axes_set
-                else (0, 0) 
+                else (0, 0)
             )
             for i in range(n_spatial)
         )
@@ -335,6 +342,9 @@ class SVDVideo:
             import numpy as np  # type: ignore
 
             conv_axes = tuple(range(1, arr.ndim))
+
+            debug(f"Convolving with scipy: {arr.shape} x {filters[0].reshape(full_kernel).shape} * {len(filters)}")
+            debug(f"Padding: {padding}, pad_mode: {pad_mode}, pad_value: {pad_value}")
             out = np.stack(
                 [
                     convolve(
@@ -659,6 +669,7 @@ class SVDVideo:
         S,
         F,
         Gt,
+        rcond=None,
     ):
         """
         Reorthogonalize SVD after applying linear filters.
@@ -678,6 +689,9 @@ class SVDVideo:
             Filtered temporal basis (X @ U).
         Gt : array (rank, spatial...)
             Filtered spatial basis (Vt @ Y', can have arbitrary spatial dims).
+        rcond : float, optional
+            Cutoff for small singular values. Values ≤ rcond * max(sf) are
+            treated as zero. Default: machine epsilon.
 
         Returns
         -------
@@ -691,17 +705,31 @@ class SVDVideo:
         if _backend(S, "numpy"):
             from scipy import linalg  # type: ignore
             import numpy as np  # type: ignore
+
+            if rcond is None:
+                rcond = np.finfo(S.dtype).eps
         elif _backend(S, "jax"):
             from jax.scipy import linalg  # type: ignore
             import jax.numpy as np  # type: ignore
+
+            if rcond is None:
+                rcond = np.finfo(S.dtype).eps
 
         # 2. Gramian Eigendecomposition (O(Mr^2 + r^3))
         sf2, Qf = linalg.eigh(F.T @ F)
         Gt_flat = Gt.reshape(Gt.shape[0], -1)
         sg2, Qg = linalg.eigh(Gt_flat @ Gt_flat.T)
-
         sf = np.sqrt(np.maximum(sf2, 0))
         sg = np.sqrt(np.maximum(sg2, 0))
+
+        # Invert singular values with rcond thresholding to avoid instability
+        sf_small_mask = sf > rcond * np.max(sf)
+        sg_small_mask = sg > rcond * np.max(sg)
+        mask_count = np.sum(~sf_small_mask) + np.sum(~sg_small_mask)
+        if mask_count > 0:
+            info(f"{mask_count} singular values below rcond threshold truncated.")
+        sf_inv = np.divide(1.0, sf, where=sf_small_mask, out=np.zeros_like(sf))
+        sg_inv = np.divide(1.0, sg, where=sg_small_mask, out=np.zeros_like(sg))
 
         # 3. Construct Core Matrix B and its SVD (O(r^3))
         # B = Sf @ Qf' @ S @ Qg @ Sg
@@ -710,9 +738,9 @@ class SVDVideo:
 
         # 4. Assembly (O((T+M)r^2))
         # U_filt = F @ (Qf @ Sf^-1) @ U_hat
-        U_filt = (F @ Qf / sf) @ U_hat
+        U_filt = (F @ Qf * sf_inv) @ U_hat
         # V_filt' = Vt_hat @ (Sg^-1 @ Qg') @ G
-        Vt_filt = (Vt_hat @ Qg.T / sg[:, None]) @ Gt_flat
+        Vt_filt = (Vt_hat @ Qg.T * sg_inv[:, None]) @ Gt_flat
 
         # Unflatten and return
         Vt_filt = Vt_filt.reshape(Vt_filt.shape[0], *Gt.shape[1:])

@@ -1,9 +1,40 @@
 from array_api_compat import array_namespace
 
-from .svd_video import SVDVideo
+from .svd_video import SVDVideo, _backend
 from ..cli.common import configure_logging
 
 logger, (error, warning, info, debug) = configure_logging("ops")
+
+
+def _savgol_temporal(video: SVDVideo, window_length: int, polyorder: int):
+    """
+    Build Savitzky-Golay kernel and apply temporally to video.U returning filtered U
+    with shape (time, rank).
+    """
+    from scipy.signal import savgol_coeffs
+
+    xp = array_namespace(video.U)
+    debug(
+        f"Applying savgol temporal filter (window={window_length}, order={polyorder})"
+    )
+
+    # Apply temporally via static convolve on U.T -> convolve along time axis
+    if _backend(video.U, "numpy"):
+        from scipy.signal import savgol_filter
+
+        U_filtered_T = savgol_filter(
+            video.U.T, window_length, polyorder, axis=1, mode="nearest"
+        )
+    else:
+        # Build savgol kernel
+        kernel = savgol_coeffs(window_length, polyorder, deriv=0)
+        debug(f"Savgol kernel: {kernel.shape}")
+        kernel = xp.asarray(kernel, dtype=video.U.dtype)
+        U_filtered_T = SVDVideo.convolve(video.U.T, kernel, dim="t", pad_mode="nearest")
+
+    U_filtered = xp.permute_dims(U_filtered_T, (1, 0))  # (time, rank)
+
+    return U_filtered
 
 
 def divisive_lowpass(
@@ -11,7 +42,7 @@ def divisive_lowpass(
     window_length: int,
     polyorder: int,
     min_baseline: float = 1e-8,
-    reorthogonalize: bool = True
+    reorthogonalize: bool = True,
 ) -> SVDVideo:
     """
     Apply divisive temporal low-pass filter to an SVD video.
@@ -37,35 +68,14 @@ def divisive_lowpass(
     SVDVideo
         Filtered video with orthonormal bases.
     """
-    from scipy.signal import savgol_coeffs
 
     xp = array_namespace(video.U)
     debug(f"Video shape: U={video.U.shape}, S={video.S.shape}, Vt={video.Vt.shape}")
 
-    # 1. Build savgol kernel
-    kernel = savgol_coeffs(window_length, polyorder, deriv=0)
-    kernel = xp.asarray(kernel, dtype=video.U.dtype)
+    # 1. Build savgol kernel and apply temporally via helper
+    U_filtered = _savgol_temporal(video, window_length, polyorder)
 
-    # 2. Apply temporally via static convolve on U.T
-    #    U.T has shape (rank, time), convolve along time axis
-    debug("Applying temporal convolution")
-    U_filtered_T = SVDVideo.convolve(video.U.T, kernel, dim="t", pad_mode='nearest')
-    U_filtered = xp.permute_dims(U_filtered_T, (1, 0))  # (time, rank)
-
-    # import matplotlib.pyplot as plt
-    # import mplutil.util as vu
-    # from scipy.signal import savgol_filter
-    # print(video.U.shape, U_filtered.shape)
-    # f, a = vu.subplots((4, 4), (2, 2))
-    # i = 10
-    # a[0, 0].plot(video.U[:,i])
-    # a[0, 0].plot(U_filtered[:,i])
-    # u_manual = savgol_filter(video.U[:, i], window_length, polyorder)
-    # a[0, 0].plot(u_manual, 'k--', lw=1)
-    # vu.label(a[0, 0], "time", "magnitude", "Smoothing")
-
-    # 3. Compute spatial mean baseline
-    #    Vt has shape (rank, spatial...), reduce over all spatial dims
+    # 2. Compute spatial mean baseline
     debug("Computing spatial mean baseline")
     spatial_sum = video.Vt
     for _ in range(video.ndim_spatial):
@@ -94,11 +104,10 @@ def divisive_lowpass(
     F = video.U / baseline_clamped[:, None]
 
     # 5. Reorthogonalize: F = (filter) @ U, Gt = Vt (no spatial filter)
-
     if reorthogonalize:
         debug("Reorthogonalizing.")
         U_new, S_new, Vt_new = SVDVideo.orthogonal(video.S, F, video.Vt)
-        
+
         # plt.tight_layout()
         # plt.show()
 
@@ -107,6 +116,34 @@ def divisive_lowpass(
     else:
         info(f"Divisive lowpass complete: output rank={video.S}")
         return SVDVideo(F, video.S, video.Vt, orthonormal=False)
-    
 
-    
+
+def subtractive_lowpass(
+    video: SVDVideo,
+    window_length: int,
+    polyorder: int,
+    reorthogonalize: bool = True,
+) -> SVDVideo:
+    """
+    Subtractive low-pass: subtract Savitzky-Golay temporal lowpass from U,
+    optionally reorthogonalize result and return new SVDVideo.
+    """
+    xp = array_namespace(video.U)
+
+    debug(f"Applying subtractive lowpass (window={window_length}, order={polyorder})")
+
+    # 1. Low-pass in temporal domain on U
+    F = _savgol_temporal(video, window_length, polyorder)
+
+    # 2. Subtract
+    G = video.U - F
+
+    # 3. Optionally reorthogonalize
+    if reorthogonalize:
+        debug("Reorthogonalizing subtractive result.")
+        U_new, S_new, Vt_new = SVDVideo.orthogonal(video.S, G, video.Vt)
+        info(f"Subtractive lowpass complete: output rank={len(S_new)}")
+        return SVDVideo(U_new, S_new, Vt_new, orthonormal=True)
+    else:
+        info("Subtractive lowpass complete: returning non-orthonormal SVDVideo")
+        return SVDVideo(G, video.S, video.Vt, orthonormal=False)

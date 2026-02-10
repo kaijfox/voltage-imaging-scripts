@@ -238,6 +238,33 @@ def divisive_lowpass_cmd(
 
 
 @click.command()
+@input_output_options
+@click.option("-w", "--window-length", type=int, required=True, help="Savitzky-Golay window length (must be odd).",)
+@click.option("-p", "--polyorder", type=int, required=True, help="Polynomial order for filter.")
+def sub_lowpass_cmd(input_path, output_path, window_length, polyorder):
+    """Apply subtractive temporal low-pass filter to SVD video."""
+    from ..io.svd_video import SVDVideo
+    from ..io.ops import subtractive_lowpass
+
+    logger, (error, warning, info, debug) = configure_logging("io")
+
+    if window_length % 2 == 0:
+        raise click.BadParameter("--window-length must be odd")
+    if polyorder >= window_length:
+        raise click.BadParameter("--polyorder must be < window-length")
+
+    info(f"Loading SVD from {input_path}")
+    video = SVDVideo.load(input_path)
+
+    info(f"Applying subtractive lowpass (window={window_length}, order={polyorder})")
+    result = subtractive_lowpass(video, window_length, polyorder)
+
+    info(f"Saving result to {output_path}")
+    result.save(output_path)
+    info("Done")
+
+
+@click.command()
 @click.argument("path", type=click.Path(exists=True))
 def svd_info(path):
     """Print info about an SVD video file."""
