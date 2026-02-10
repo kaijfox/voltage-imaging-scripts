@@ -23,6 +23,8 @@ from .state import AppState, EditMode, ViewMode
 from .keybindings import DEFAULT_BINDINGS
 from .roi import ROI, RefineState
 from .operations import extend_roi_watershed
+from .compositing import compose_rgb
+from .view_panels import MapDetailWidget
 
 
 class OutlineItem(pg.GraphicsObject):
@@ -172,15 +174,30 @@ class ImageView(pg.GraphicsLayoutWidget):
         self._on_candidate_changed()
 
     def _on_image_changed(self):
-        """Update displayed image."""
-        image = self.state.current_image
-        if image is not None:
-            # pyqtgraph expects (width, height) so transpose
-            self.image_item.setImage(image.T)
-            # Only autoRange on first load
-            if self._needs_autorange:
-                self.plot.autoRange()
-                self._needs_autorange = False
+        """Update displayed image via multi-layer RGB compositing."""
+        # Build enabled layers for compositing
+        layers = []
+        map_layers = self.state.map_layers
+
+        for mode, layer_state in map_layers.items():
+            if layer_state.enabled:
+                raw = self.state.get_raw_map(mode)
+                if raw is not None:
+                    gmean = self.state.get_gmean(mode)
+                    layers.append((raw, layer_state, gmean))
+
+        if layers:
+            rgb = compose_rgb(layers)
+            self.image_item.setImage(rgb.transpose(1, 0, 2), levels=[0, 1])
+        else:
+            image = self.state.current_image
+            if image is not None:
+                self.image_item.setImage(image.T)
+
+        if self._needs_autorange:
+            self.plot.autoRange()
+            self._needs_autorange = False
+
 
     def _on_roi_changed(self):
         """Update committed ROI outline."""
@@ -806,7 +823,7 @@ class CandidateActionsSection(QFrame):
 
 
 class ViewModeSection(QFrame):
-    """View mode selection."""
+    """View mode selection (now multi-toggle per-layer)."""
 
     def __init__(self, state: AppState, parent=None):
         super().__init__(parent)
@@ -823,12 +840,21 @@ class ViewModeSection(QFrame):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(2)
 
-        self.btn_mean = ToolButton("Mean")
+        # Use state's summary_label for mean button text
+        self.btn_mean = ToolButton(self.state.summary_label)
         self.btn_corr = ToolButton("Corr")
         self.btn_local_corr = ToolButton("Local")
 
+        # Non-exclusive toggles: allow multiple layers enabled
         self.button_group = QButtonGroup(self)
-        self.button_group.setExclusive(True)
+        self.button_group.setExclusive(False)
+
+        # Map modes to buttons for easy lookup
+        self._mode_to_btn = {
+            ViewMode.MEAN: self.btn_mean,
+            ViewMode.CORRELATION: self.btn_corr,
+            ViewMode.LOCAL_CORRELATION: self.btn_local_corr,
+        }
 
         for btn, mode in [
             (self.btn_mean, ViewMode.MEAN),
@@ -837,25 +863,47 @@ class ViewModeSection(QFrame):
         ]:
             self.button_group.addButton(btn)
             btn.clicked.connect(
-                lambda checked, m=mode: self._on_view_clicked(m, checked)
+                lambda checked, m=mode: self._on_view_toggled(m, checked)
             )
             btn_layout.addWidget(btn)
 
         layout.addLayout(btn_layout)
 
-        # Set initial state
-        self.btn_mean.setChecked(True)
+        # Initialize checked state from AppState.map_layers
+        for mode, btn in self._mode_to_btn.items():
+            layer = self.state.map_layers.get(mode)
+            btn.setChecked(bool(layer and layer.enabled))
 
-        self.state.view_mode_changed.connect(self._on_view_mode_changed)
+        # Connect to state signals
+        self.state.map_layer_changed.connect(self._on_map_layer_changed)
+        self.state.active_detail_map_changed.connect(self._on_active_detail_map_changed)
 
-    def _on_view_clicked(self, mode: ViewMode, checked: bool):
+    def _on_view_toggled(self, mode: ViewMode, checked: bool):
+        """Handle toggle: enable/disable layer, and focus as active detail when enabled."""
         if checked:
-            self.state.set_view_mode(mode)
+            # Enable layer and set as active detail for editing
+            self.state.set_map_enabled(mode, True)
+            self.state.set_active_detail_map(mode)
+        else:
+            # Disable layer
+            self.state.set_map_enabled(mode, False)
 
+    def _on_map_layer_changed(self, mode_changed: ViewMode):
+        """Update button checked state when a layer's enabled flag changes."""
+        btn = self._mode_to_btn.get(mode_changed)
+        layer = self.state.map_layers.get(mode_changed)
+        if btn is not None and layer is not None:
+            btn.setChecked(bool(layer.enabled))
+
+    def _on_active_detail_map_changed(self, mode: ViewMode):
+        """Optional hook when active detail focus changes. Currently no UI decoration needed."""
+        # The MapDetailWidget listens to this signal and repopulates its controls.
+        return
+
+    # Keep compatibility stub for older external callers
     def _on_view_mode_changed(self, mode: ViewMode):
-        self.btn_mean.setChecked(mode == ViewMode.MEAN)
-        self.btn_corr.setChecked(mode == ViewMode.CORRELATION)
-        self.btn_local_corr.setChecked(mode == ViewMode.LOCAL_CORRELATION)
+        # No-op: legacy single-view mode handled elsewhere
+        return
 
 
 class ROISelectorSection(QFrame):
@@ -1112,17 +1160,9 @@ class MainViewDetail(QFrame):
 
         layout.addWidget(self.minimap_widget)
 
-        # Dynamic range controls
-        range_label = QLabel("Dynamic Range")
-        range_label.setStyleSheet("color: #aaa; font-weight: bold;")
-        layout.addWidget(range_label)
-
-        # Histogram widget
-        self.histogram = pg.HistogramLUTWidget()
-        self.histogram.setFixedHeight(80)
-        self.histogram.setBackground("#1a1a1a")
-        self.histogram.item.sigLevelsChanged.connect(self._on_levels_changed)
-        layout.addWidget(self.histogram)
+        # Map detail controls (replaces HistogramLUTWidget)
+        self.map_detail = MapDetailWidget(state)
+        layout.addWidget(self.map_detail)
 
         # View mode section (reuse existing)
         self.view_section = ViewModeSection(state)
@@ -1136,12 +1176,9 @@ class MainViewDetail(QFrame):
         self._image_view = None
         self._updating_rect = False
 
-        # Per-view-mode dynamic range storage
-        self._levels_cache: dict[ViewMode, tuple] = {}
-        self._current_view_mode = state.view_mode
-
-        # Connect to state
+        # Connect to state signals
         self.state.image_changed.connect(self._on_image_changed)
+        self.state.active_detail_map_changed.connect(self._on_image_changed)
         self.state.view_mode_changed.connect(self._on_view_mode_changed)
 
     def set_image_view(self, image_view: "ImageView"):
@@ -1151,43 +1188,19 @@ class MainViewDetail(QFrame):
         self._on_image_changed()
 
     def _on_view_mode_changed(self, mode: ViewMode):
-        """Save current levels and restore cached levels for new mode."""
-        # Save current levels for previous mode
-        if hasattr(self, '_current_view_mode'):
-            try:
-                self._levels_cache[self._current_view_mode] = self.histogram.getLevels()
-            except:
-                pass
-        self._current_view_mode = mode
+        """Placeholder to keep compatibility with older behavior."""
+        # No-op now; MapDetailWidget stores per-layer levels
 
     def _on_image_changed(self):
-        """Update minimap and histogram when image changes."""
-        image = self.state.current_image
-        if image is not None:
-            # Update the histogram without overwriting the levels cache
-            mode = self.state.view_mode
-            retained_levels = self._levels_cache.get(mode, None)
-
-            self.minimap_image.setImage(image.T)
+        """Update minimap and map-detail when image or active map changes."""
+        # Minimap should show the raw image for active_detail_map
+        img = self.state.current_image
+        if img is not None:
+            self.minimap_image.setImage(img.T)
             self.minimap_plot.autoRange()
-            self.histogram.setImageItem(self.minimap_image)
-
-            if retained_levels is not None:
-                self._levels_cache[mode] = retained_levels
-
-            # Restore cached levels or autoscale
-            
-            if mode in self._levels_cache:
-                levels = self._levels_cache[mode]
-                self.histogram.setLevels(*levels)
-                self.histogram.setHistogramRange(levels[0], levels[1])
-            else:
-                # Autoscale to image range
-                mn, mx = float(image.min()), float(image.max())
-                self.histogram.setLevels(mn, mx)
-                self.histogram.setHistogramRange(mn, mx)
-
             self._update_viewport_rect()
+        # MapDetailWidget listens to active_detail_map_changed and map_layer_changed
+        # to update its controls; no need to set histogram item here.
 
     def _on_main_view_range_changed(self):
         """Update viewport rect when main view pans/zooms."""
@@ -1228,15 +1241,6 @@ class MainViewDetail(QFrame):
             padding=0,
         )
         self._updating_rect = False
-
-    def _on_levels_changed(self):
-        """Update main image levels when histogram changes."""
-        if self._image_view is None:
-            return
-        levels = self.histogram.getLevels()
-        self._image_view.image_item.setLevels(levels)
-        # Cache levels for current view mode
-        self._levels_cache[self.state.view_mode] = levels
 
 
 class ROIDetailSection(QFrame):

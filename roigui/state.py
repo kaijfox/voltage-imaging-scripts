@@ -6,6 +6,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from .roi import ROI, ROIGeometry
+from .compositing import MapLayerState
 
 if TYPE_CHECKING:
     from .data_source import DataSource
@@ -58,12 +59,23 @@ class AppState(QObject):
     view_mode_changed = Signal(ViewMode)
     edit_mode_changed = Signal(EditMode)
     image_changed = Signal()  # Underlying image data changed
+    # New signals for multi-layer map overlay
+    map_layer_changed = Signal(object)          # emits ViewMode
+    active_detail_map_changed = Signal(object)  # emits ViewMode
     pen_size_changed = Signal(int)
     refine_index_changed = Signal(int)  # Refine slider position changed
     correlation_seed_changed = Signal()  # Seed pixel for correlation map changed
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
+        # Map layer states (per ViewMode)
+        self._map_layers: dict[ViewMode, MapLayerState] = {
+            ViewMode.MEAN: MapLayerState(enabled=True, color="w"),
+            ViewMode.CORRELATION: MapLayerState(enabled=False, color="g"),
+            ViewMode.LOCAL_CORRELATION: MapLayerState(enabled=False, color="r"),
+        }
+        self._active_detail_map: ViewMode = ViewMode.MEAN
+        self._summary_label: str = "Mean"
         # Multi-ROI storage
         self._rois: list[ROI] = []  # List of committed ROIs
         self._roi_ids: List[str] = []  # List of ROI IDs (parallel to _rois)
@@ -81,6 +93,10 @@ class AppState(QObject):
         self._pen_size: int = 3
         self._refine_state: Optional["RefineState"] = None
         self._correlation_seed: Optional[tuple] = None  # (row, col) for correlation map
+        self._corr_map_cache: Optional[np.ndarray] = None  # cached correlation map
+        # Per-mode caches for histogram and gmean (invalidated with corr cache or on set_data_source)
+        self._hist_cache: dict = {}    # ViewMode -> (centers, heights)
+        self._gmean_cache: dict = {}   # ViewMode -> float
         self._output_path = None  # Set by launch()
 
     # Data source
@@ -90,6 +106,9 @@ class AppState(QObject):
 
     def set_data_source(self, source: "DataSource"):
         self._data_source = source
+        self._corr_map_cache = None
+        self._hist_cache.clear()
+        self._gmean_cache.clear()
         self.image_changed.emit()
 
     # Multi-ROI management
@@ -167,6 +186,7 @@ class AppState(QObject):
             self.edit_mode_changed.emit(EditMode.NONE)
 
         self.current_roi_index_changed.emit(index)
+        self._invalidate_corr_caches()
         self.roi_changed.emit()
         self.candidate_changed.emit()
 
@@ -280,6 +300,7 @@ class AppState(QObject):
                 self.add_and_select_roi(roi)
                 return  # add_and_select_roi already emits signals
 
+        self._invalidate_corr_caches()
         self.roi_changed.emit()
         self.candidate_changed.emit()
 
@@ -371,6 +392,7 @@ class AppState(QObject):
         # Sync to list
         self._sync_current_roi_to_list()
 
+        self._invalidate_corr_caches()
         self.roi_changed.emit()
         self.candidate_changed.emit()
 
@@ -451,6 +473,7 @@ class AppState(QObject):
 
     def set_correlation_seed(self, row: int, col: int):
         self._correlation_seed = (row, col)
+        self._invalidate_corr_caches()
         self.correlation_seed_changed.emit()
         if self._view_mode == ViewMode.CORRELATION:
             self.image_changed.emit()
@@ -464,10 +487,18 @@ class AppState(QObject):
 
     @property
     def current_image(self) -> Optional[np.ndarray]:
-        """Get image for current view mode."""
+        """Get image for current view mode.
+        If map-layer machinery is active return the raw image for active_detail_map
+        (used by extend/propose and minimap). Falls back to legacy view_mode behavior.
+        """
         if self._data_source is None:
             return None
 
+        # Prefer active_detail_map if available
+        if hasattr(self, "_map_layers") and self._active_detail_map is not None:
+            return self.get_raw_map(self._active_detail_map)
+
+        # Legacy behavior (fallback)
         if self._view_mode == ViewMode.MEAN:
             return self._data_source.mean_image()
         elif self._view_mode == ViewMode.CORRELATION:
@@ -482,6 +513,141 @@ class AppState(QObject):
             return self._data_source.local_correlation_map()
 
         return self._data_source.mean_image()
+
+    # --- Map layer accessors / mutators ---
+    @property
+    def map_layers(self) -> dict:
+        """Return dict[ViewMode, MapLayerState]."""
+        return self._map_layers
+
+    @property
+    def active_detail_map(self) -> ViewMode:
+        return self._active_detail_map
+
+    @property
+    def summary_label(self) -> str:
+        return self._summary_label
+
+    def set_active_detail_map(self, mode: ViewMode):
+        if self._active_detail_map == mode:
+            return
+        self._active_detail_map = mode
+        self.active_detail_map_changed.emit(mode)
+        # Update minimap / single-image consumers
+        self.image_changed.emit()
+
+    def set_map_enabled(self, mode: ViewMode, enabled: bool):
+        state = self._map_layers.get(mode)
+        if state is None:
+            return
+        if state.enabled == enabled:
+            # Still make active when toggled on via button click
+            self.map_layer_changed.emit(mode)
+            self.image_changed.emit()
+            return
+        state.enabled = enabled
+        self.map_layer_changed.emit(mode)
+        self.image_changed.emit()
+
+    def update_map_layer(self, mode: ViewMode, **kwargs):
+        """Update MapLayerState fields and emit change signals."""
+        state = self._map_layers.get(mode)
+        if state is None:
+            return
+        for k, v in kwargs.items():
+            if hasattr(state, k):
+                setattr(state, k, v)
+        # Invalidate gmean cache when lo/hi changes (gmean depends on normalization)
+        if "lo" in kwargs or "hi" in kwargs:
+            self._gmean_cache = {k: v for k, v in self._gmean_cache.items()
+                                 if k[0] != mode}
+        self.map_layer_changed.emit(mode)
+        self.image_changed.emit()
+
+    def get_raw_map(self, mode: ViewMode) -> np.ndarray:
+        """Return raw (h,w) image for a given ViewMode. Correlation map is cached."""
+        if self._data_source is None:
+            return None
+
+        if mode == ViewMode.MEAN:
+            return self._data_source.mean_image()
+        elif mode == ViewMode.CORRELATION:
+            if self._corr_map_cache is not None:
+                return self._corr_map_cache
+            if self._correlation_seed is not None:
+                ret = self._data_source.correlation_map(*self._correlation_seed)
+            elif self.roi is not None and len(self.roi.footprint) > 0:
+                centroid = self.roi.footprint.mean(axis=0).astype(int)
+                ret = self._data_source.correlation_map(centroid[0], centroid[1])
+            else:
+                return self._data_source.mean_image()
+            self._corr_map_cache = ret
+            return ret
+        elif mode == ViewMode.LOCAL_CORRELATION:
+            return self._data_source.local_correlation_map()
+        else:
+            return self._data_source.mean_image()
+
+    def get_histogram(self, mode: ViewMode, n_quantiles: int = 128) -> tuple:
+        """Return cached (x, density) for quantile-based density estimate.
+
+        Uses n_quantiles evenly-spaced quantiles; density estimated as
+        1/diff(quantiles) (higher density where quantiles are close together).
+        """
+        if mode in self._hist_cache:
+            return self._hist_cache[mode]
+        raw = self.get_raw_map(mode)
+        if raw is None:
+            return (np.array([]), np.array([]))
+        flat = np.ravel(raw)
+        flat = flat[np.isfinite(flat)]
+        if flat.size == 0:
+            return (np.array([]), np.array([]))
+        probs = np.linspace(0, 1, n_quantiles)
+        q = np.quantile(flat, probs)
+        # Midpoints and local density
+        x = (q[:-1] + q[1:]) / 2.0
+        dx = np.diff(q)
+        dx = np.maximum(dx, 1e-12)
+        density = 1.0 / dx
+        self._hist_cache[mode] = (x, density)
+        return (x, density)
+
+    def get_gmean(self, mode: ViewMode) -> float:
+        """Return cached geometric mean of normalized map. Computes on miss.
+
+        The gmean is computed on the lo/hi-normalized image clipped to (0,1],
+        so it depends on the current lo/hi. We cache it keyed by (mode, lo, hi).
+        """
+        layer = self._map_layers.get(mode)
+        if layer is None:
+            return 0.5
+        cache_key = (mode, layer.lo, layer.hi)
+        if cache_key in self._gmean_cache:
+            return self._gmean_cache[cache_key]
+        raw = self.get_raw_map(mode)
+        if raw is None:
+            return 0.5
+        denom = layer.hi - layer.lo
+        if denom <= 1e-12:
+            return 0.5
+        norm = np.clip((raw - layer.lo) / denom, 0.0, 1.0)
+        # Geometric mean via exp(mean(log(x))) on positive values only
+        pos = norm[norm > 1e-10]
+        if pos.size == 0:
+            gmean = 0.5
+        else:
+            gmean = float(np.exp(np.mean(np.log(pos))))
+        self._gmean_cache[cache_key] = gmean
+        return gmean
+
+    def _invalidate_corr_caches(self):
+        """Clear correlation map, histogram, and gmean caches for CORRELATION mode."""
+        self._corr_map_cache = None
+        self._hist_cache.pop(ViewMode.CORRELATION, None)
+        # Clear all gmean entries for CORRELATION (any lo/hi combo)
+        self._gmean_cache = {k: v for k, v in self._gmean_cache.items()
+                             if k[0] != ViewMode.CORRELATION}
 
     # Legacy compatibility
     def set_mean_image(self, image: np.ndarray):

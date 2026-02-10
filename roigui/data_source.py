@@ -89,7 +89,8 @@ class SVDDataSource:
     The temporal activity at pixel (r, c) is approximately: U[r, c, :] @ u.T
     """
 
-    def __init__(self, U: np.ndarray, u: np.ndarray, mean: Optional[np.ndarray] = None):
+    def __init__(self, U: np.ndarray, u: np.ndarray, mean: Optional[np.ndarray] = None,
+                 summary_mode: str = "mean"):
         """Initialize from SVD components.
 
         Args:
@@ -107,6 +108,7 @@ class SVDDataSource:
         self._n_components = k
         self._U = U.astype(np.float32)
         self._u = u.astype(np.float32)
+        self._summary_mode = summary_mode
 
         # Compute mean from components if not provided
         if mean is None:
@@ -114,6 +116,10 @@ class SVDDataSource:
             self._mean = (self._U @ u_mean).astype(np.float32)
         else:
             self._mean = mean.astype(np.float32)
+
+        if self._summary_mode == "std":
+            # If using std summary, we won't use the mean image, so zero it out
+            self._std = np.linalg.norm(self._U, axis=2).astype(np.float32)
 
         # Precompute norms for correlation
         self._U_norms = np.linalg.norm(self._U, axis=2)
@@ -140,6 +146,9 @@ class SVDDataSource:
         return self._u
 
     def mean_image(self) -> np.ndarray:
+        if getattr(self, "_summary_mode", "mean") == "std":
+            # Return spatial norm across components as a stand-in for std dev summary
+            return self._std
         return self._mean
 
     def correlation_map(self, seed_row: int, seed_col: int) -> np.ndarray:
@@ -198,7 +207,8 @@ class ArraySVDDataSource(SVDDataSource):
 
     def __init__(self, video: np.ndarray, n_components: Optional[int] = None,
                  high_pass_width: int = 200, spatial_smooth_sigma: float = 1.0,
-                 tmin: Optional[int] = None, tmax: Optional[int] = None):
+                 tmin: Optional[int] = None, tmax: Optional[int] = None,
+                 summary_mode: str = "mean"):
         """Initialize from raw video array.
 
         Args:
@@ -220,7 +230,7 @@ class ArraySVDDataSource(SVDDataSource):
             n_components = min(t // 2, 500)
 
         U, u = self._compute_svd(video, n_components, high_pass_width, spatial_smooth_sigma)
-        super().__init__(U, u, mean)
+        super().__init__(U, u, mean, summary_mode=summary_mode)
 
     @staticmethod
     def _compute_svd(video: np.ndarray, n_components: int,
@@ -265,7 +275,8 @@ class PrecomputedSVDDataSource(SVDDataSource):
     """SVD data source from pre-computed SVDVideo or HDF5 file."""
 
     def __init__(self, svd, n_components: Optional[int] = None,
-                 tmin: Optional[int] = None, tmax: Optional[int] = None):
+                 tmin: Optional[int] = None, tmax: Optional[int] = None,
+                 summary_mode: str = "mean"):
         """Initialize from SVDVideo.
 
         Args:
@@ -285,7 +296,7 @@ class PrecomputedSVDDataSource(SVDDataSource):
         spatial = (Vt[:k] * S[:k, None, None]).transpose(1, 2, 0)
         temporal = U[tmin:tmax, :k]
 
-        super().__init__(spatial, temporal)
+        super().__init__(spatial, temporal, summary_mode=summary_mode)
 
 
 class MeanImageDataSource:

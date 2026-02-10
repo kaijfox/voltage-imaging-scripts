@@ -67,6 +67,7 @@ def launch(
     n_components: Optional[int] = None,
     tmin: Optional[int] = None,
     tmax: Optional[int] = None,
+    summary_mode: str = "mean",
 ) -> None:
     """Launch the ROI editor GUI.
 
@@ -102,7 +103,8 @@ def launch(
     if isinstance(data, SVDVideo):
         print(f"Using pre-computed SVD.")
         data_source = PrecomputedSVDDataSource(
-            data, n_components=n_components, tmin=tmin, tmax=tmax
+            data, n_components=n_components, tmin=tmin, tmax=tmax,
+            summary_mode=summary_mode
         )
         print(f"Loaded {data_source.n_components} components")
     elif isinstance(data, (str, Path)):
@@ -111,14 +113,16 @@ def launch(
         print(f"Loading SVD from {data}...")
         svd = SVDVideo.load(data)
         data_source = PrecomputedSVDDataSource(
-            svd, n_components=n_components, tmin=tmin, tmax=tmax
+            svd, n_components=n_components, tmin=tmin, tmax=tmax,
+            summary_mode=summary_mode
         )
         print(f"Loaded {data_source.n_components} components")
     elif isinstance(data, np.ndarray):
         if data.ndim == 3:
             print(f"Computing SVD from video {data.shape}...")
             data_source = ArraySVDDataSource(
-                data, n_components=n_components, tmin=tmin, tmax=tmax
+                data, n_components=n_components, tmin=tmin, tmax=tmax,
+                summary_mode=summary_mode
             )
             print(f"SVD complete: {data_source.n_components} components")
         elif data.ndim == 2:
@@ -131,6 +135,9 @@ def launch(
         raise TypeError(f"Unsupported data type: {type(data)}")
 
     state.set_data_source(data_source)
+
+    # Set summary label on state for UI text
+    state._summary_label = "Std" if summary_mode == "std" else "Mean"
 
     # Handle ROI collection input
     loaded_ids = None
