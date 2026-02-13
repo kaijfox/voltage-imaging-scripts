@@ -33,6 +33,7 @@ def launch(
     napari_viewer=None,
     rank: Optional[int] = None,
     spatial_roi: Optional[Tuple[int, int, int, int]] = None,
+    vrng: Optional[Tuple[float, float]] = None
 ) -> SVDViewer:
     """Launch the SVD video viewer.
 
@@ -91,6 +92,7 @@ def launch(
         napari_viewer=napari_viewer,
         rank=rank,
         spatial_roi=spatial_roi,
+        vrng=vrng
     )
 
     # If we created the napari viewer, start the event loop

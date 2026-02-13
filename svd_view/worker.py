@@ -18,6 +18,7 @@ class FrameRequest:
     frame_idx: int
     rank: int
     spatial_roi: Optional[Tuple[int, int, int, int]]
+    vrng: Optional[Tuple[float, float]] = None
     priority: int = 0  # Higher = more important (for scrubbing)
     prefetch: bool = False  # True if this is a prefetch request
 
@@ -28,6 +29,7 @@ class FrameResult:
     frame_idx: int
     rank: int
     spatial_roi: Optional[Tuple[int, int, int, int]]
+    vrng: Optional[Tuple[float, float]]
     frame_data: np.ndarray
     io_latency_ms: float
     compute_time_ms: float
@@ -95,6 +97,7 @@ class FrameWorkerController:
                     request.frame_idx,
                     rank=request.rank,
                     spatial_roi=request.spatial_roi,
+                    vrng=request.vrng,
                 )
                 t1 = time.perf_counter()
 
@@ -104,6 +107,7 @@ class FrameWorkerController:
                     frame_idx=request.frame_idx,
                     rank=request.rank,
                     spatial_roi=request.spatial_roi,
+                    vrng=request.vrng,
                     frame_data=frame,
                     io_latency_ms=0.0,  # Embedded in compute
                     compute_time_ms=(t1 - t0) * 1000,
@@ -128,6 +132,7 @@ class FrameWorkerController:
         frame_idx: int,
         rank: int,
         spatial_roi: Optional[Tuple[int, int, int, int]],
+        vrng: Optional[Tuple[float, float]] = None,
         priority: int = 0,
         prefetch: bool = False,
     ):
@@ -141,6 +146,8 @@ class FrameWorkerController:
             Truncation rank.
         spatial_roi : tuple or None
             Spatial ROI (r0, r1, c0, c1) or None.
+        vrng : tuple or None
+            Display range (vmin, vmax) to pass to the data source.
         priority : int
             Request priority (higher = more important).
         prefetch : bool
@@ -153,6 +160,7 @@ class FrameWorkerController:
             frame_idx=frame_idx,
             rank=rank,
             spatial_roi=spatial_roi,
+            vrng=vrng,
             priority=priority,
             prefetch=prefetch,
         )
@@ -163,6 +171,7 @@ class FrameWorkerController:
         frame_indices: list,
         rank: int,
         spatial_roi: Optional[Tuple[int, int, int, int]],
+        vrng: Optional[Tuple[float, float]] = None,
         prefetch: bool = False,
     ):
         """Submit multiple frame reconstruction requests.
@@ -175,6 +184,8 @@ class FrameWorkerController:
             Truncation rank.
         spatial_roi : tuple or None
             Spatial ROI.
+        vrng : tuple or None
+            Display range to pass to reconstruct_frame.
         prefetch : bool
             True if these are prefetch requests.
         """
@@ -183,6 +194,7 @@ class FrameWorkerController:
                 frame_idx,
                 rank,
                 spatial_roi,
+                vrng=vrng,
                 priority=0,
                 prefetch=prefetch,
             )

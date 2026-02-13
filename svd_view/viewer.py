@@ -37,6 +37,7 @@ class SVDViewer:
         napari_viewer=None,
         rank: Optional[int] = None,
         spatial_roi: Optional[Tuple[int, int, int, int]] = None,
+        vrng: Optional[Tuple[float, float]] = None,
     ):
         """Initialize the SVD viewer.
 
@@ -69,6 +70,8 @@ class SVDViewer:
             self._state.set_rank(rank, emit=False)
         if spatial_roi is not None:
             self._state.set_spatial_roi(spatial_roi, emit=False)
+        if vrng is not None:
+            self._state.set_vrng(vrng, emit=False)
 
         # Initialize frame buffer
         self._buffer = FrameBuffer(capacity=30)
@@ -194,33 +197,37 @@ class SVDViewer:
         frame_idx = self._state.current_frame
         rank = self._state.rank
         roi = self._state.spatial_roi
+        vrng = self._state.vrng
 
         # Check cache first
-        cached = self._buffer.get(frame_idx, rank, roi)
+        cached = self._buffer.get(frame_idx, rank, roi, vrng)
         if cached is not None:
             self._display_frame(cached)
             self._trigger_prefetch()
             return
 
         # Request from worker
-        self._worker.request_frame(frame_idx, rank, roi, priority=10)
+        self._worker.request_frame(frame_idx, rank, roi, vrng=vrng, priority=10)
 
     def _trigger_prefetch(self):
         """Request prefetch of upcoming frames if playing."""
         if not self._state.is_playing:
             return
 
+        vrng = self._state.vrng
         prefetch = self._buffer.get_prefetch_requests(
             self._state.current_frame,
             self._state.rank,
             self._state.spatial_roi,
             self._state.n_frames,
             n_ahead=5,
+            vrng=vrng,
         )
         self._worker.request_frames(
             prefetch,
             self._state.rank,
             self._state.spatial_roi,
+            vrng=vrng,
             prefetch=True,
         )
 
@@ -231,6 +238,7 @@ class SVDViewer:
             result.frame_idx,
             result.rank,
             result.spatial_roi,
+            result.vrng,
             result.frame_data,
         )
 
@@ -249,6 +257,7 @@ class SVDViewer:
             result.frame_idx == self._state.current_frame
             and result.rank == self._state.rank
             and result.spatial_roi == self._state.spatial_roi
+            and result.vrng == self._state.vrng
         ):
             self._state.notify_frame_ready(result.frame_idx, result.frame_data)
 
@@ -294,8 +303,9 @@ class SVDViewer:
         next_frame = self._state.next_frame()
         rank = self._state.rank
         roi = self._state.spatial_roi
+        vrng = self._state.vrng
 
-        cached = self._buffer.get(next_frame, rank, roi)
+        cached = self._buffer.get(next_frame, rank, roi, vrng)
         if cached is not None:
             # Advance frame
             self._state.set_current_frame(next_frame)

@@ -38,6 +38,7 @@ class ViewerState(QObject):
     frame_changed = Signal(int)  # Current frame index changed
     rank_changed = Signal(int)  # Truncation rank changed
     roi_changed = Signal(object)  # Spatial window (r0, r1, c0, c1) or None
+    vrng_changed = Signal(object)  # Display scaling (vmin, vmax) or None
     playback_state_changed = Signal(object)  # PlaybackState enum
     frame_ready = Signal(int, object)  # Worker delivers frame (index, ndarray)
     telemetry_updated = Signal(object)  # TelemetryData
@@ -50,6 +51,7 @@ class ViewerState(QObject):
         self._current_frame: int = 0
         self._rank: int = 0  # 0 means use full rank
         self._spatial_roi: Optional[Tuple[int, int, int, int]] = None  # (r0, r1, c0, c1)
+        self._vrng: Optional[Tuple[float, float]] = None  # data -> display scaling
         self._playback_state: PlaybackState = PlaybackState.PAUSED
         self._fps: float = 30.0
         self._telemetry: TelemetryData = TelemetryData()
@@ -122,6 +124,16 @@ class ViewerState(QObject):
             self._spatial_roi = roi
             if emit:
                 self.roi_changed.emit(roi)
+
+    @property
+    def vrng(self) -> Optional[Tuple[float, float]]:
+        return self._vrng
+
+    def set_vrng(self, vrng: Optional[Tuple[float, float]], emit: bool = True):
+        if self._vrng != vrng:
+            self._vrng = vrng
+            if emit:
+                self.vrng_changed.emit(vrng)
 
     @property
     def frame_shape(self) -> Tuple[int, ...]:

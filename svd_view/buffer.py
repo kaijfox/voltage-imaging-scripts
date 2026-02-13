@@ -13,9 +13,10 @@ class CacheKey:
     frame_idx: int
     rank: int
     spatial_roi: Optional[Tuple[int, int, int, int]]
+    vrng: Optional[Tuple[float, float]]
 
     def __hash__(self):
-        return hash((self.frame_idx, self.rank, self.spatial_roi))
+        return hash((self.frame_idx, self.rank, self.spatial_roi, self.vrng))
 
     def __eq__(self, other):
         if not isinstance(other, CacheKey):
@@ -24,6 +25,7 @@ class CacheKey:
             self.frame_idx == other.frame_idx
             and self.rank == other.rank
             and self.spatial_roi == other.spatial_roi
+            and self.vrng == other.vrng
         )
 
 
@@ -33,7 +35,7 @@ class FrameBuffer:
     Features:
     - LRU eviction policy
     - Configurable capacity
-    - Parameter-aware caching (rank, ROI)
+    - Parameter-aware caching (rank, ROI, vrng)
     - Prefetch request generation for look-ahead
 
     Usage:
@@ -80,6 +82,7 @@ class FrameBuffer:
         frame_idx: int,
         rank: int,
         spatial_roi: Optional[Tuple[int, int, int, int]],
+        vrng: Optional[Tuple[float, float]],
     ) -> Optional[np.ndarray]:
         """Get frame from cache if available.
 
@@ -91,13 +94,15 @@ class FrameBuffer:
             Truncation rank used for reconstruction.
         spatial_roi : tuple or None
             Spatial ROI (r0, r1, c0, c1) or None.
+        vrng : tuple or None
+            Display range (vmin, vmax) used to produce this cached frame.
 
         Returns
         -------
         frame : ndarray or None
             Cached frame or None if not in cache.
         """
-        key = CacheKey(frame_idx, rank, spatial_roi)
+        key = CacheKey(frame_idx, rank, spatial_roi, vrng)
         if key in self._cache:
             # Move to end (most recently used)
             self._cache.move_to_end(key)
@@ -109,6 +114,7 @@ class FrameBuffer:
         frame_idx: int,
         rank: int,
         spatial_roi: Optional[Tuple[int, int, int, int]],
+        vrng: Optional[Tuple[float, float]],
         frame_data: np.ndarray,
     ):
         """Store frame in cache.
@@ -121,10 +127,12 @@ class FrameBuffer:
             Truncation rank used for reconstruction.
         spatial_roi : tuple or None
             Spatial ROI (r0, r1, c0, c1) or None.
+        vrng : tuple or None
+            Display range used for this frame.
         frame_data : ndarray
             Reconstructed frame data.
         """
-        key = CacheKey(frame_idx, rank, spatial_roi)
+        key = CacheKey(frame_idx, rank, spatial_roi, vrng)
 
         # If already cached, update and move to end
         if key in self._cache:
@@ -144,9 +152,10 @@ class FrameBuffer:
         frame_idx: int,
         rank: int,
         spatial_roi: Optional[Tuple[int, int, int, int]],
+        vrng: Optional[Tuple[float, float]],
     ) -> bool:
         """Check if frame is in cache without updating LRU order."""
-        key = CacheKey(frame_idx, rank, spatial_roi)
+        key = CacheKey(frame_idx, rank, spatial_roi, vrng)
         return key in self._cache
 
     def get_prefetch_requests(
@@ -156,6 +165,7 @@ class FrameBuffer:
         spatial_roi: Optional[Tuple[int, int, int, int]],
         n_frames: int,
         n_ahead: int = 5,
+        vrng: Optional[Tuple[float, float]] = None,
     ) -> list:
         """Get list of frames to prefetch for smooth playback.
 
@@ -171,6 +181,8 @@ class FrameBuffer:
             Total number of frames (for wrapping).
         n_ahead : int
             Number of frames to look ahead.
+        vrng : tuple or None
+            Display range used for requests.
 
         Returns
         -------
@@ -180,7 +192,7 @@ class FrameBuffer:
         requests = []
         for i in range(1, n_ahead + 1):
             frame_idx = (current_frame + i) % n_frames if n_frames > 0 else 0
-            if not self.has(frame_idx, rank, spatial_roi):
+            if not self.has(frame_idx, rank, spatial_roi, vrng):
                 requests.append(frame_idx)
         return requests
 
@@ -188,10 +200,11 @@ class FrameBuffer:
         self,
         rank: Optional[int] = None,
         spatial_roi: Optional[Tuple[int, int, int, int]] = None,
+        vrng: Optional[Tuple[float, float]] = None,
     ):
         """Invalidate cached frames that don't match new parameters.
 
-        Call this when rank or ROI changes to clear stale cached frames.
+        Call this when rank, ROI or vrng changes to clear stale cached frames.
 
         Parameters
         ----------
@@ -199,12 +212,16 @@ class FrameBuffer:
             New rank. If provided, evict frames with different rank.
         spatial_roi : tuple or None, optional
             New ROI. If provided, evict frames with different ROI.
+        vrng : tuple or None, optional
+            New vrng. If provided, evict frames with different vrng.
         """
         keys_to_remove = []
-        for key in self._cache:
+        for key in list(self._cache.keys()):
             if rank is not None and key.rank != rank:
                 keys_to_remove.append(key)
             elif spatial_roi is not None and key.spatial_roi != spatial_roi:
+                keys_to_remove.append(key)
+            elif vrng is not None and key.vrng != vrng:
                 keys_to_remove.append(key)
 
         for key in keys_to_remove:

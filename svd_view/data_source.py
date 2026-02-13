@@ -78,6 +78,7 @@ class LazyHDF5SVDSource:
         frame_idx: int,
         rank: Optional[int] = None,
         spatial_roi: Optional[Tuple[int, int, int, int]] = None,
+        vrng: Optional[Tuple[float, float]] = None,
     ) -> np.ndarray:
         """Reconstruct a single frame using hyperslab selection.
 
@@ -118,6 +119,14 @@ class LazyHDF5SVDSource:
         # U_row * S_k gives scaled coefficients, then contract with Vh
         scaled = U_row * S_k  # (k,)
         frame = np.tensordot(scaled, Vh_sel, axes=(0, 0))
+
+        # Normalize to [0, 1]
+        if vrng is not None:
+            vmin, vmax = vrng
+            frame = (frame - vmin) / (vmax - vmin) 
+        else:
+            vmin, vmax = frame.min(), frame.max()
+            frame = (frame - vmin) / (vmax - vmin)
 
         return frame
 
