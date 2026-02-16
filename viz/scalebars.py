@@ -71,6 +71,7 @@ def scale_bar(
     loc: Optional[str] = None,
     xy: Optional[tuple[float, float]] = None,
     fmt: Optional[str] = None,
+    label: Optional[str] = None,
     text_loc: str = "outside",
     text_orient: str = "along",
     text_pad_pts: float = 5.0,
@@ -98,6 +99,8 @@ def scale_bar(
     fmt: str
         Format string applied as `fmt.format(size)`; empty string
         suppresses the label.
+    label : str or None
+        Explicit label to use if given.
     text_loc: str
         'inside' or 'outside' placement relative to the bar.
     text_orient: str
@@ -171,15 +174,16 @@ def scale_bar(
     # Set clip_on=False on the Text artist
 
     # Format label
-    label = str(size)
-    if fmt is not None:
-        try:
-            label = fmt.format(size)
-        except Exception:
-            label = ""
-    else:
-        if int(size) == size:
-            label = str(int(size))
+    if label is None:
+        label = str(size)
+        if fmt is not None:
+            try:
+                label = fmt.format(size)
+            except Exception:
+                label = ""
+        else:
+            if int(size) == size:
+                label = str(int(size))
 
     text = None
     if label != "":

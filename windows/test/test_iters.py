@@ -29,18 +29,31 @@ def test_ak_apply_1d_single_element():
     expected = ak.Array([[0.], [0], [0]])
     assert ak.almost_equal(result, expected)
 
-def test_ak_apply_1d_string():
+def test_ak_apply_1d_char():
     # Test with non-numeric data
     array = ak.Array([['a', 'b'], ['c']])
     result = ak_apply_1d(array, lambda x: x)
     assert ak.almost_equal(result, array)
+
+def test_ak_apply_1d_string():
+    # Test with non-numeric data
+    array = ak.Array([['aa', 'bb'], ['cc']])
+    result = ak_apply_1d(array, np.char.upper)
+    expected = ak.Array([['AA', 'BB'], ['CC']])
+    assert ak.almost_equal(result, expected)
+
+def test_ak_apply_1d_input_1d():
+    # Test with 1D input
+    array = ak.Array([1, 2, 3])
+    result = ak_apply_1d(array, demean)
+    expected = ak.Array([-1., 0, 1])
+    assert ak.almost_equal(result, expected)
 
 def test_ak_reduce_1d_basic():
     # Test reduction with min function
     array = ak.Array([[1, 2, 3], [4, 5]])
     result = ak_reduce_1d(array, np.min)
     expected = ak.Array([1, 4])
-    print("Result of ak_reduce_1d_basic:", result)
     assert ak.almost_equal(result, expected)
 
 def test_ak_reduce_1d_empty():
@@ -57,11 +70,26 @@ def test_ak_reduce_1d_single():
     expected = ak.Array([1, 2, 3])
     assert ak.almost_equal(result, expected)
 
-def test_ak_reduce_1d_string():
+def test_ak_reduce_1d_char():
     # Test with non-numeric data
     array = ak.Array([['a', 'b'], ['c']])
-    expected = ak.Array(['a', 'c'])
-    result = ak_reduce_1d(array, np.min)
+    expected = ak.Array(['ab', 'c'])
+    result = ak_reduce_1d(array, lambda x: ''.join(x))
+    assert ak.almost_equal(result, expected)
+
+def test_ak_reduce_1d_string():
+    # Test with non-numeric data
+    array = ak.Array([['aa', 'bb'], ['cc']])
+    expected = ak.Array(['aa', 'cc'])
+    result = ak_reduce_1d(array, lambda x: x[0])
+    assert ak.almost_equal(result, expected)
+
+def test_ak_reduce_1d_string_to_int():
+    # Test with non-numeric data
+    array = ak.Array([['aa', 'bbb'], ['cc']])
+    expected = ak.Array([2, 2])
+    result = ak_reduce_1d(array, lambda x: np.strings.str_len(x).min())
+
     assert ak.almost_equal(result, expected)
 
 def test_ak_reduce_1d_nested_empty():
@@ -69,6 +97,13 @@ def test_ak_reduce_1d_nested_empty():
     array = ak.Array([[], []])
     result = ak_reduce_1d(array, np.min)
     expected = ak.Array([[], []])
+    assert ak.almost_equal(result, expected)
+
+def test_ak_reduce_1d_input_1d():
+    # Test with 1D input
+    array = ak.Array([1, 2, 3])
+    result = ak_reduce_1d(array, np.min)
+    expected = ak.Array([1])
     assert ak.almost_equal(result, expected)
 
 def test_ak_unique():

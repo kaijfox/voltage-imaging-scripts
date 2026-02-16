@@ -229,7 +229,6 @@ def psth_grid_dispatch(
     # Compute relevant stats & insert to kws dictionary
     mean = sem = std = None
     if "mean" in mode or "sem" in mode or "std" in mode:
-        
         mean = ak.mean(windows, axis=-2)
         base_kwargs["mean"] = mean
 
@@ -246,6 +245,8 @@ def psth_grid_dispatch(
 
     # Compute arrays and colors for compare mode
     if compare_ix is not None:
+        print(np.asarray(mean).shape)
+        print(compare_ix)
         compare_mean = mean[compare_ix] if mean is not None else None
         compare_sem = sem[compare_ix] if sem is not None else None
         compare_std = std[compare_ix] if std is not None else None

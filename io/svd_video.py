@@ -239,6 +239,16 @@ class SVDVideo:
 
         return reconst
 
+    def reconstruct(self, time_idx, spatial_idx, rank_idx):
+        Usel = self.U[time_idx, :][:, rank_idx]
+        Vsel = self.Vt[rank_idx][:, *spatial_idx]
+        if Usel.ndim == 1:
+            Uscaled = Usel * self.S[rank_idx]
+            return (Vsel.T @ Uscaled[None].T).T[0]
+        else:
+            Uscaled = Usel * self.S[rank_idx][None, :]
+            return (Vsel.T @ Uscaled.T).T
+
     def backend(self, check_eq=None):
         return _backend(self.U, check_eq)
 

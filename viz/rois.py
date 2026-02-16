@@ -253,12 +253,12 @@ def apply_cmap(
 
     # compute vmin/vmax
     if mode == "absolute":
-        vmin = vmin or float(np.nanmin(vid))
-        vmax = vmax or float(np.nanmax(vid))
+        vmin = float(np.nanmin(vid)) if vmin is None else vmin
+        vmax = float(np.nanmax(vid)) if vmax is None else vmax
     elif mode == "centered":
         m = max(abs(float(np.nanmin(vid))), abs(float(np.nanmax(vid))))
-        vmin = vmin or -m
-        vmax = vmax or m
+        vmin = -m if vmin is None else vmin
+        vmax = m if vmax is None else vmax
     else:
         raise ValueError("mode must be 'absolute' or 'centered'")
 
@@ -419,7 +419,8 @@ def display_rois(
 
         if shape is None:
             # default size if no video or inferreable shape
-            shape = (6 * (dpi or 100.0), (8 * (dpi or 100.0)))
+            shape = (6 / (dpi or 100.0), (8 / (dpi or 100.0)))
+    print(shape, dpi or 100.)
 
     # 3. create figure/axis and display
     fig, ax = _ensure_axis(fig, axis, shape=shape, scale=dpi or 100.0)
@@ -427,6 +428,9 @@ def display_rois(
     if svd_video is not None:
         ax.imshow(display_img, cmap="gray", origin="upper")
         ax.set_axis_off()
+    else:
+        ax.set_xlim(0, shape[1])
+        ax.set_ylim(shape[0], 0)
 
     # 4. overlay ROIs
     inferred_names, inferred_colors = _infer_names_and_colors(roi_collection)
@@ -629,7 +633,7 @@ def display_events(
             y_trace = traces.data[i]
             # sample y positions at integer frame indices (clip indices)
             idx = np.clip(spikes.astype(int), 0, y_trace.size - 1)
-            yvals = y_trace[idx]
+            yvals = y_trace[idx] + trace_locations[i]
             plot_kws = {
                 **dict(
                     linestyle="None",

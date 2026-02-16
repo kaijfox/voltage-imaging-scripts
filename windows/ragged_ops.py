@@ -28,12 +28,13 @@ def ak_infer_shape(arr):
     shape = ()
 
     # Determine number of axes; fall back to 1 if unknown
-    ndim = getattr(arr, "ndim", None)
-    if ndim is None:
-        try:
-            ndim = ak.ndim(arr)
-        except Exception:
-            ndim = 1
+    ndim = 1
+    if hasattr(arr, "ndim"):
+        ndim = arr.ndim
+    elif hasattr(arr, "layout") and hasattr(arr.layout, "minmax_depth"):
+        ndim = arr.layout.minmax_depth[0]
+    elif hasattr(arr, "minmax_depth"):
+        ndim = arr.minmax_depth[0]
 
     for i in range(int(ndim)):
         counts = ak.num(arr, axis=i)
@@ -52,7 +53,7 @@ def ak_infer_shape(arr):
                 all_eq = ak.all(counts == first)
             except TypeError:
                 all_eq = np.all(counts == first)
-            
+
             if all_eq:
                 shape = shape + (int(first),)
             else:
@@ -624,6 +625,10 @@ def ak_apply_1d(array, func, highlevel=True, behavior=None, attrs=None):
             content_type(result_masked),  # Match original dtype
         )
 
+    if ak.highlevel.Array(layout).ndim == 1:
+        # For 1d arrays, wrap and apply
+        return ak_apply_1d([layout], func)[0]
+
     out = ak._do.recursively_apply(layout, compute_apply)
     return ctx.wrap(out, highlevel=highlevel)
 
@@ -637,32 +642,36 @@ def _extract_layout_info(layout, nplike):
     if layout.branch_depth == (False, 1):
 
         if len(layout) == 0:
+            print("Handling empty content depth 1")
             # For empty arrays, create empty data & offsets
             data = nplike.asarray([])
             offsets = nplike.asarray([0, 0])
             dtype = data.dtype
             content_type = lambda *a, **kw: type(layout)()
-        
+
         else:
+
+            print("Handling 1D array depth 1")
             # For 1D arrays, use the entire data as a single segment
             data = layout.data
             offsets = nplike.asarray([0, layout.data.size])
             dtype = data.dtype
             content_type = type(layout)
-    
+
     elif layout.branch_depth == (False, 2):
         listoffsetarray = layout.to_ListOffsetArray64(False)
-    
+
         if (
             layout.content.parameter("__array__") == "string"
             or layout.content.parameter("__array__") == "bytestring"
         ):
+
             # For strings, form highlevel Array (see create_action)
             content = listoffsetarray.content[
                 listoffsetarray.offsets[0] : listoffsetarray.offsets[-1]
             ]
             offsets = listoffsetarray.offsets.data
-            data = content.content.data
+            data = ak.highlevel.Array(content).to_numpy()
             offsets = offsets - offsets[0]
             dtype = "uint8"
             content_type = lambda x: ak.with_parameter(
@@ -680,24 +689,29 @@ def _extract_layout_info(layout, nplike):
                 highlevel=False,
             )
 
+            def content_type(x):
+                return ak.from_numpy(x).layout
+
         elif len(listoffsetarray.content) == 0:
+
+            print("Handling empty content depth 2")
 
             # For empty arrays, create empty data & offsets
             data = nplike.asarray([])
             offsets = listoffsetarray.offsets.data
             dtype = data.dtype
             content_type = lambda *a, **kw: ak.contents.ListOffsetArray(
-                listoffsetarray.offsets,
-                type(listoffsetarray.content)()
+                listoffsetarray.offsets, type(listoffsetarray.content)()
             )
-     
+
         else:
+            print("Handling normal content")
             # For normal 2D arrays, extract the content and offsets
             data = listoffsetarray.content.data
             offsets = listoffsetarray.offsets.data
             content_type = type(listoffsetarray.content)
             dtype = data.dtype
-    
+
     else:
         return None, None, None, None  # Unsupported layout depth
 
@@ -805,9 +819,12 @@ def ak_reduce_1d(array, func, highlevel=True, behavior=None, attrs=None):
         # Return a new ListOffsetArray with the flattened data and updated offsets
         return content_type(result)
 
+    if ak.highlevel.Array(layout).ndim == 1:
+        # For 1d arrays, wrap and apply
+        return ak_reduce_1d([layout], func)[0]
+
     out = ak._do.recursively_apply(layout, compute_apply)
     return ctx.wrap(out, highlevel=highlevel)
-
 
 
 def slice_by_events(trace_data, event_frames, n_pre, n_post):
@@ -825,7 +842,7 @@ def slice_by_events(trace_data, event_frames, n_pre, n_post):
         raise ValueError(
             "trace_data and event_frames must have the same number of dimensions"
         )
-    
+
     # Ensure batch shapes are same
     trace_data, events = ak.broadcast_arrays(
         trace_data, events, depth_limit=trace_data.ndim - 1
@@ -833,7 +850,7 @@ def slice_by_events(trace_data, event_frames, n_pre, n_post):
 
     # Extract generalized shape of trace (and therefore of batch dimensions)
     shape = ()
-    if hasattr(trace_data, 'shape'):
+    if hasattr(trace_data, "shape"):
         shape = trace_data.shape
     else:
         for i in range(trace_data.ndim):
@@ -842,12 +859,10 @@ def slice_by_events(trace_data, event_frames, n_pre, n_post):
             if np.all(num == num_first):
                 shape = shape + (num_first,)
             else:
-                shape = shape + (num,)            
+                shape = shape + (num,)
 
     n_frames = shape[-1]
     batch_shape = shape[:-1]
-
-    
 
     # (*batch_shape, <n_events>, frames_per_window)
     rel_times = np.arange(-n_pre, n_post + 1)
@@ -885,11 +900,10 @@ def slice_by_events(trace_data, event_frames, n_pre, n_post):
     if isinstance(window_ixs, ak.contents.RegularArray):
         window_ixs = ak.from_regular(window_ixs, axis=1, highlevel=False)
 
-
     # Mark invalid indices (will be nan'ed post-hoc)
     valid_ixs = (
-        (ak.highlevel.Array(window_ixs) >= 0) &
-        (ak.highlevel.Array(window_ixs) < n_frames)
+        (ak.highlevel.Array(window_ixs) >= 0)
+        & (ak.highlevel.Array(window_ixs) < n_frames)
     ).layout
     window_ixs = ak.where(valid_ixs, window_ixs, 0)
 
@@ -905,7 +919,7 @@ def slice_by_events(trace_data, event_frames, n_pre, n_post):
     for i in range(len(batch_shape) - 1):
         tgt_shape = batch_shape[-i - 1]
         # Flatten target shape up to last axis if irregular, to match flat `sampled`
-        if hasattr(tgt_shape, 'ndim') and tgt_shape.ndim > 0:
+        if hasattr(tgt_shape, "ndim") and tgt_shape.ndim > 0:
             tgt_shape = ak.flatten(tgt_shape, axis=None)
         sampled = ak.unflatten(sampled, tgt_shape, axis=0, highlevel=False)
     sampled = ak.highlevel.Array(sampled)

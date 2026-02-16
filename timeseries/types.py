@@ -89,6 +89,19 @@ class Traces:
         return Traces(data=data, ids=ids, fs=fs)
 
 
+def _is_nested_indexer(key):
+    """Check if key is an iterable of iterables (list of lists, ak.Array ndim=2, etc.)."""
+    try:
+        import awkward as ak #type: ignore
+        if isinstance(key, ak.Array) and key.ndim == 2:
+            return True
+    except ImportError:
+        pass
+    if isinstance(key, (list, tuple)) and len(key) > 0 and isinstance(key[0], (list, tuple, np.ndarray)):
+        return True
+    return False
+
+
 @dataclass
 class Events:
     """Detected spike events.
@@ -184,6 +197,34 @@ class Events:
             return Events(
                 spike_frames=[self.spike_frames[i] for i in indices],
                 ids=key,
+                detection_params=self.detection_params,
+            )
+        elif _is_nested_indexer(key):
+            # Per-event bool mask or int fancy index. See spec: design/handoff/26-02-10_spike-fns.md
+            # Bool: new_spike_frames[i] = spike_frames[i][key[i]], len(key[i]) must match
+            # Int:  new_spike_frames[i] = spike_frames[i][key[i]]
+            # Implement both cases supporting ak.Array (ndim==2) or nested lists/ndarrays
+            import awkward as ak #type: ignore
+
+            if isinstance(key, ak.Array) and key.ndim == 2:
+                key_list = ak.to_list(key)
+            else:
+                key_list = [np.asarray(k) for k in key]
+
+            new_spike_frames = []
+            for orig, k in zip(self.spike_frames, key_list):
+                orig_arr = np.asarray(orig)
+                if k.dtype == bool:
+                    if len(k) != len(orig_arr):
+                        raise ValueError("Boolean mask length must match number of spikes for that cell")
+                    new_spike_frames.append(orig_arr[k])
+                else:
+                    # integer fancy indexing
+                    new_spike_frames.append(orig_arr[np.asarray(k)])
+
+            return Events(
+                spike_frames=[np.atleast_1d(s) for s in new_spike_frames],
+                ids=self.ids,
                 detection_params=self.detection_params,
             )
         else:
