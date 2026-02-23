@@ -154,3 +154,46 @@ def spatial_magnitudes(trace_data, event_frames, footprints, ref_idx, fs, ms_pre
     data = [np.full(len(fp), mag) for fp, mag in zip(footprints, mean_mags_list)]
     img = footprint_image(footprints, data, cmap=cmap, vmin=vmin, vmax=vmax)
     return img
+
+
+def psth_heatmap(windows, fs, zero, ax=None, **imshow_kws):
+    """Heatmap of peri-event trace windows (one row per event).
+
+    Parameters
+    ----------
+    windows: ndarray, shape (n_events, n_frames)
+        Peri-event windows, already sorted by caller if desired.
+    fs: float
+        Sampling rate in Hz.
+    zero: int
+        Frame index within each window corresponding to the event (time=0).
+    ax: matplotlib Axes, optional
+    **imshow_kws
+        Forwarded to ax.imshow (e.g. cmap, vmin, vmax, aspect).
+
+    Returns
+    -------
+    fig, ax, im
+    """
+    import matplotlib.pyplot as plt
+
+    windows = np.asarray(windows, dtype=float)
+    if windows.ndim != 2:
+        raise ValueError("windows must be 2D (n_events, n_frames)")
+
+    n_events, n_frames = windows.shape
+    t = (np.arange(n_frames) - zero) / fs * 1000  # ms
+
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
+    extent = [t[0], t[-1], n_events - 0.5, -0.5]
+    defaults = dict(aspect="auto", interpolation="none")
+    im = ax.imshow(windows, extent=extent, **{**defaults, **imshow_kws})
+    ax.axvline(0, color="w", lw=0.5, ls="--")
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("trial")
+
+    return fig, ax, im

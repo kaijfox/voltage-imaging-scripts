@@ -147,6 +147,105 @@ def gamma_correct(images: np.ndarray, target: float = 0.5) -> np.ndarray:
     else:
         return out.reshape(orig_shape)
 
+# def quantile_normalize(arr, n_quantiles=256, vmin=None, vmax=None, cmap=None)
+
+from matplotlib.colors import LinearSegmentedColormap
+
+def quantile_normalize(
+    arr: np.ndarray,
+    n_quantiles: int = 256,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    gamma: float | None = None,
+    cmap=None,
+):
+    """Map values to a uniform [0,1] using an interpolated inverse CDF (quantile normalization).
+
+    Map an array to a uniform distribution by approximating the inverse CDF using
+    N quantiles. Data are first linearly scaled to [0,1] using ``vmin``/``vmax``
+    (inferred from finite data if not provided) and clipped; quantiles are
+    computed on that scaled range.
+
+    Parameters
+    ----------
+    arr: ndarray
+        Input array of any shape. NaNs are preserved and excluded from fitting.
+    n_quantiles: int, default 256
+        Number of quantile levels used to approximate the CDF.
+    vmin, vmax: float or None
+        Minimum and maximum used to linearly scale the data before quantile
+        estimation. If ``None`` they are inferred from the finite values of
+        ``arr``. If ``vmin == vmax`` a ValueError is raised.
+    cmap: optional
+        Anything accepted by ``plt.get_cmap``. If provided the function will
+        return a ``LinearSegmentedColormap`` whose color sampling follows the
+        inverse CDF; if ``None`` the function returns the normalized array.
+
+    Returns
+    -------
+    ndarray or matplotlib.colors.Colormap
+        If ``cmap`` is ``None`` returns a float ndarray with the same shape as
+        ``arr`` with values in [0,1] (NaNs preserved). If ``cmap`` is provided
+        returns a ``LinearSegmentedColormap`` constructed by sampling the base
+        colormap through the inverse CDF.
+    """
+    arr = np.asarray(arr)
+    
+    # Infer vmin/vmax if not provided
+    if vmin is None:
+        vmin = float(np.nanmin(arr))
+    if vmax is None:
+        vmax = float(np.nanmax(arr))
+
+    if vmin == vmax:
+        raise ValueError("vmin and vmax must differ (constant data cannot be scaled).")
+
+    # Scale valid data to [0,1] and clip
+    scaled = (arr - vmin) / (vmax - vmin)
+
+    # Only fit quantiles on non-nan values within [vmin, vmax]
+    flat = scaled.ravel()
+    finite_mask = np.isfinite(flat) & (flat >= 0) & (flat <= 1)
+    valid = flat[finite_mask]
+
+    # Compute quantiles on the scaled data
+    q = np.linspace(0.0, 1.0, n_quantiles)
+    v = np.quantile(valid, q)
+    
+    # Deduplicate equal quantile values for safe interpolation
+    uvals, idx = np.unique(v, return_index=True)
+    uq = q[idx]
+
+    if uq.size < 2:
+        raise ValueError(
+            "Input array must contain at least two unique finite values after scaling."
+        )
+
+    # Map scaled values -> uniform [0,1] via interpolated inverse CDF (value -> prob)
+    if cmap is None:
+        arr_scaled = (arr - vmin) / (vmax - vmin)
+        mapped = np.interp(arr_scaled, uvals, uq, left=0.0, right=1.0)
+        return mapped
+
+    # Build a new colormap sampled through the inverse CDF: cmap_new(q) = base_cmap(icdf(q))
+    base_cmap = plt.get_cmap(cmap)
+    normed_val = np.linspace(0.0, 1.0, 256)
+    umin, umax = uvals[0], uvals[-1]
+    gamma = gamma if gamma is not None else 1.0
+    icdf_values = np.interp(
+        normed_val,
+        ((uvals - umin) / (umax - umin)) ** gamma,
+        uq,
+        left=0.,
+        right=1.0
+    )
+    cmap_name = f"quantile_{getattr(base_cmap, 'name', str(base_cmap))}"
+    new_cmap = LinearSegmentedColormap.from_list(
+        cmap_name, base_cmap(icdf_values), N=len(normed_val)
+    )
+
+    return new_cmap
+
 
 def overlay_rois(
     roi_collection: ROICollection,
@@ -362,6 +461,8 @@ def setup_video(
             text_kws=text_kws,
             stroke_kws=stroke_kws,
         )
+    else:
+        line_artists = {}
 
     # update function
     def update_fn(frame_idx: int):
@@ -451,7 +552,7 @@ def display_rois(
 
 def display_traces(
     traces: Traces,
-    roi_collection: ROICollection,
+    roi_collection: Optional[ROICollection] = None,
     select: Optional[Sequence[int] | Sequence[str]] = None,
     fig: Optional[plt.Figure] = None,
     axis: Optional[plt.Axes] = None,
@@ -459,7 +560,9 @@ def display_traces(
     names: Optional[Sequence[str]] = None,
     colors: Optional[Sequence[Any]] = None,
     positions: Optional[Sequence[float]] = None,
+    tick_mode: str = "overwrite",
     scale_to: Optional[float] = None,
+    line_kws: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Plot traces for a set of ROIs.
 
@@ -474,8 +577,14 @@ def display_traces(
     absolute value fits within +/- (scale_to / 2). Scaling is applied before
     computing vertical spacing so the span/offset computation is consistent.
 
-    Returns metadata dict with 'positions' (y positions), 'colors', and 'names'.
+    tick_mode : str, one of 'overwrite', 'add', 'none'
+        Controls how yticks/yticklabels are applied.
+
+    Returns metadata dict with 'positions' (y positions), 'colors', 'names', and
+    'scale_factors' (list or None).
     """
+    from .psth_grid import override_kws
+    
     data = np.asarray(traces.data)
     if scale_to is not None:
         # make working float copy for potential scaling
@@ -486,32 +595,49 @@ def display_traces(
     if select is None:
         sel_idx = list(range(n_cells))
     else:
-        # If select contains strings and roi_collection.ids present, map them
-        if (
-            len(select) > 0
-            and isinstance(select[0], str)
-            and getattr(roi_collection, "ids", None) is not None
-        ):
-            ids = list(roi_collection.ids)
-            sel_idx = [ids.index(s) for s in select]
+        if len(select) > 0 and isinstance(select[0], str):
+            if roi_collection is not None and getattr(roi_collection, "ids", None) is not None:
+                ids = list(roi_collection.ids)
+                sel_idx = [ids.index(s) for s in select]
+            elif getattr(traces, "ids", None) is not None:
+                ids = list(traces.ids)
+                sel_idx = [ids.index(s) for s in select]
+            else:
+                sel_idx = list(select)
         else:
             sel_idx = list(select)
 
     # Optional scaling: scale each selected row by its max absolute value so that
     # its amplitude fits within +/- (scale_to / 2).
+    scale_factors_used = None
     if scale_to is not None:
         if not (isinstance(scale_to, (int, float)) and scale_to > 0):
             raise ValueError("'scale_to' must be a positive number")
         half_range = float(scale_to) / 2.0
+        scale_factors_used = []
         for i in sel_idx:
             row = data[i]
             max_abs = np.nanmax(np.abs(row))
             if max_abs > 0:
                 factor = half_range / max_abs
                 data[i] = row * factor
+            else:
+                factor = 1.0
+            scale_factors_used.append(factor)
 
     # Infer / default metadata as needed
-    inferred_names, inferred_colors = _infer_names_and_colors(roi_collection, sel_idx)
+    if roi_collection is None:
+        cmap = plt.get_cmap("tab10")
+        if getattr(traces, "ids", None) is not None:
+            names_all = list(traces.ids)
+        else:
+            names_all = [f"Trace {i}" for i in range(n_cells)]
+        colors_all = [cmap(i % cmap.N) for i in range(n_cells)]
+
+        inferred_names = [names_all[i] for i in sel_idx]
+        inferred_colors = [colors_all[i] for i in sel_idx]
+    else:
+        inferred_names, inferred_colors = _infer_names_and_colors(roi_collection, sel_idx)
 
     # Resolve names
     if names is None:
@@ -556,7 +682,7 @@ def display_traces(
         name = names_used[k]
         color = colors_used[k]
         y = data[i] + positions_used[k]
-        ax.plot(x, y, color=color)
+        ax.plot(x, y, **override_kws(line_kws, color=color))
 
     # Labeled ticks around the traces & axis labels
     if ticks is not None:
@@ -577,14 +703,30 @@ def display_traces(
         tick_locations = positions_used
         tick_labels = names_used
 
-    ax.set_yticks(tick_locations)
-    ax.set_yticklabels(tick_labels)
+    # Apply tick_mode
+    if tick_mode not in ("overwrite", "add", "none"):
+        raise ValueError("tick_mode must be one of 'overwrite', 'add', or 'none'")
+
+    if tick_mode == "overwrite":
+        ax.set_yticks(tick_locations)
+        ax.set_yticklabels(tick_labels)
+    elif tick_mode == "add":
+        existing_ticks = ax.get_yticks()
+        existing_labels = [t.get_text() for t in ax.get_yticklabels()]
+        # Append new ticks/labels
+        combined_ticks = np.concatenate([np.asarray(existing_ticks), np.asarray(tick_locations)])
+        combined_labels = list(existing_labels) + list(tick_labels)
+        ax.set_yticks(combined_ticks)
+        ax.set_yticklabels(combined_labels)
+    else:  # 'none'
+        pass
+
     ax.set_xlabel(xlabel)
 
     return (
         fig,
         ax,
-        {"positions": positions_used, "colors": colors_used, "names": names_used},
+        {"positions": positions_used, "colors": colors_used, "names": names_used, "scale_factors": scale_factors_used},
     )
 
 
@@ -633,8 +775,8 @@ def display_events(
             y_trace = traces.data[i]
             # sample y positions at integer frame indices (clip indices)
             idx = np.clip(spikes.astype(int), 0, y_trace.size - 1)
-            yvals = y_trace[idx] + trace_locations[i]
-            plot_kws = {
+            yvals = y_trace[idx] + trace_locations[k]
+            merged_kws = {
                 **dict(
                     linestyle="None",
                     marker=".",
@@ -642,14 +784,14 @@ def display_events(
                 ),
                 **plot_kws,
             }
-            ax.plot(xvals, yvals, **plot_kws)
+            ax.plot(xvals, yvals, **merged_kws)
         elif trace_locations is not None:
             # events as vertical bars matching extent
-            ymin, ymax = trace_locations[i]
+            ymin, ymax = trace_locations[k]
             for xv in xvals:
                 ax.vlines(xv, ymin, ymax, **plot_kws)
         else:
-            plot_kws = {
+            merged_kws = {
                 **dict(
                     linestyle="None",
                     marker="|",
@@ -659,7 +801,7 @@ def display_events(
             }
             # events as points on separate row
             y = -k  # separate row per ROI
-            ax.plot(xvals, np.full_like(xvals, y), **plot_kws)
+            ax.plot(xvals, np.full_like(xvals, y), **merged_kws)
         plotted.append(i)
 
     ax.set_xlabel(xlabel)

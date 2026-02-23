@@ -57,9 +57,12 @@ def filter_spiking_rois(
 ) -> Tuple[List[int], List]:
     """Return indices in subtree that have spikes and their corresponding canonical ids."""
     spiking_ixs = [i for i in subtree_ixs if len(spikes.spike_frames[i]) > 0]
-    spiking_ids = [
-        tree._to_hid(idx_to_id[i]).long(all_ids=tree._hids) for i in spiking_ixs
-    ]
+    if hasattr(tree, '_to_hid'):
+        spiking_ids = [
+            tree._to_hid(idx_to_id[i]).long(all_ids=tree._hids) for i in spiking_ixs
+        ]
+    else:
+        spiking_ids = [spikes.ids[i] for i in spiking_ixs]
     return spiking_ixs, spiking_ids
 
 
@@ -111,6 +114,61 @@ def _broadcast_compared_indices(
 
 def _get_names(tree, ids):
     return [tree._to_hid(r).short(all_ids=tree._hids) for r in ids]
+
+def precompute_psth_grid_without_tree(
+    traces: Traces,
+    spikes: Any,
+    window_ms: Tuple[int, int],
+    fs: float,
+    roi_collection: ROICollection,
+    compare_id: Optional[Any] = None,
+    color_by: str = "trace",
+):
+    # Extract names and indices
+    trace_ids = traces.ids
+    event_ids = spikes.ids
+    trace_ixs = np.arange(len(trace_ids))
+    event_ixs = np.arange(len(event_ids))
+    event_ixs, event_ids = filter_spiking_rois(event_ixs, spikes, None, None)
+
+    # Names and colors
+    trace_names = trace_ids
+    event_names = event_ids
+    if color_by == "trace":
+        trace_colors = roi_collection[trace_ixs].colors if roi_collection is not None else None
+        event_colors = None
+    elif color_by == "event":
+        trace_colors = None
+        event_colors = roi_collection[event_ixs].colors if roi_collection is not None else None
+    else:
+        raise ValueError("color_by must be 'trace' or 'event'")
+
+    # Compute windows
+    if isinstance(window_ms, (int, float)):
+        window_ms = (window_ms, window_ms)
+    n_pre = int(np.ceil(window_ms[0] * fs / 1000))
+    n_post = int(np.ceil(window_ms[1] * fs / 1000))
+    samples = _prepare_and_extract_windows(
+        traces, spikes, trace_ixs, event_ixs, n_pre, n_post
+    )
+
+    # Set up comparison
+    compare_ix = (
+        _broadcast_compared_indices(trace_ids, event_ids, compare_id)
+        if compare_id is not None
+        else None
+    )
+
+    return dict(
+        windows=samples,
+        trace_names=trace_names,
+        event_names=event_names,
+        trace_colors=trace_colors,
+        event_colors=event_colors,
+        fs=fs,
+        zero=n_pre,
+        compare_ix=compare_ix,
+    )
 
 
 def precompute_psth_grid(

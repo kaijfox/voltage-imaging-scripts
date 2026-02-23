@@ -102,7 +102,7 @@ def slice_videos_by_events(
     max_rank: Optional[int] = None,
     row_slice: slice = slice(None),
     col_slice: slice = slice(None),
-    spatial_mask = None,
+    spatial_mask=None,
 ) -> ak.Array:
     """
     Compute per-event triggered videos from SVD components (no averaging).
@@ -127,7 +127,11 @@ def slice_videos_by_events(
     ak.Array
         Ragged array of shape (*batch, <n_events>, window_t, row, col).
     """
-    from ..windows.ragged_ops import ak_flatten_n_times, ak_infer_shape, ak_unflatten_by_batch_shape
+    from ..windows.ragged_ops import (
+        ak_flatten_n_times,
+        ak_infer_shape,
+        ak_unflatten_by_batch_shape,
+    )
 
     n_pre = int(round(pre_ms * fs / 1000.0))
     n_post = int(round(post_ms * fs / 1000.0))
@@ -173,17 +177,13 @@ def slice_videos_by_events(
     return frames
 
 
-
-
-
-
 def video_and_trace(
     output_path,
     trace_mean: np.ndarray,
     frames: np.ndarray,
     fs: float,
     pre_ms: float,
-    roi_collection,
+    roi_collection: Optional[object] = None,
     ms_per_s: float = 20.0,
     height: float = 2.0,
     roi_name: str = "",
@@ -280,7 +280,11 @@ def video_and_trace(
         )
 
     # trace color
-    trace_color = roi_collection.colors[0]
+    trace_color = (
+        roi_collection.colors[0]
+        if (roi_collection is not None and hasattr(roi_collection, "colors"))
+        else "k"
+    )
 
     # convert scalebar floats to dict
     if isinstance(x_scalebar, (int, float)):
