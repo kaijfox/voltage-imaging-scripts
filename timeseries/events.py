@@ -3,7 +3,7 @@
 from typing import Any
 
 import numpy as np
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, convolve
 
 from .types import Events, Traces
 from ..cli.common import configure_logging
@@ -150,3 +150,61 @@ def detect_spikes(
     }
 
     return hpf_traces, events, info
+
+
+def despike(
+    traces: Traces,
+    events: Events,
+    n_pre: int,
+    n_post: int,
+) -> tuple[Traces, np.ndarray]:
+    """Subtract estimated spike waveforms from traces.
+
+    Estimates a mean spike waveform per cell by averaging peri-event windows,
+    then reconstructs the spike contribution via convolution of an impulse
+    train with the waveform and subtracts it.
+
+    Parameters
+    ----------
+    traces: Traces
+        Input traces, data shape (n_cells, n_frames).
+    events: Events
+        Spike frames, spike_frames length n_cells, each an array of frame indices.
+    n_pre, n_post: int
+        Samples before/after each spike used to estimate the waveform.
+
+    Returns
+    -------
+    despiked: Traces
+        Traces with spike waveforms subtracted.
+    waveforms: ndarray, shape (n_cells, n_pre + n_post + 1)
+        Estimated mean spike waveform per cell.
+    """
+    import awkward as ak
+    from ..windows.ragged_ops import slice_by_events
+
+    data = np.asarray(traces.data, dtype=float)
+    n_cells, n_frames = data.shape
+    window_len = n_pre + n_post + 1
+
+    # (n_cells, <n_events>, window_len)
+    windows = slice_by_events(data, events.spike_frames, n_pre, n_post)
+    waveforms = ak.mean(windows, axis=1).to_numpy()  # (n_cells, window_len)
+
+    event_component = np.zeros_like(data)
+    for i in range(n_cells):
+        frames = np.asarray(events.spike_frames[i], dtype=int)
+        valid = frames[(frames >= 0) & (frames < n_frames)]
+        if len(valid) == 0:
+            continue
+        event_component[i, valid] = 1.0
+        event_component[i, n_post:-n_pre] = convolve(
+            event_component[i], waveforms[i], mode="valid"
+        )
+
+    despiked = Traces(
+        data=data - event_component,
+        ids=traces.ids,
+        fs=traces.fs,
+    )
+    return despiked, waveforms

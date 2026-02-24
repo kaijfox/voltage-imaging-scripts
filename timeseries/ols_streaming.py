@@ -85,11 +85,14 @@ def extract_traces(
 
     # Generate ids if not provided
     if ids is None:
-        ids = [f"ROI {i}" for i in range(K)]
+        if isinstance(rois, ROICollection) and rois.ids is not None:
+            ids = rois.ids
+        else:
+            ids = [f"ROI {i}" for i in range(K)]
 
     # Detect source type and dispatch
     if isinstance(source, SVDVideo):
-        F = extract_from_svd(
+        F, F_np = extract_from_svd(
             source,
             W,
             neuropil_range,
@@ -115,7 +118,7 @@ def extract_traces(
             # Load SVD and extract
             srsvd = SRSVD(str(source_path))
             svd_video = srsvd.to_loaded_svd()
-            F = extract_from_svd(
+            F, F_np = extract_from_svd(
                 svd_video,
                 W,
                 neuropil_range,
@@ -144,6 +147,7 @@ def extract_traces(
                 weighted=weighted,
                 compute_mean=compute_mean,
             )
+            F_np = None
         else:
             raise ValueError(
                 f"H5 file must contain either 'video' dataset or 'U','S','Vh' datasets"
@@ -153,7 +157,10 @@ def extract_traces(
             f"source must be SVDVideo, or path to H5 file, got {type(source)}"
         )
 
-    return Traces(data=F, ids=ids, fs=fs)
+    return (
+        Traces(data=F, ids=ids, fs=fs),
+        Traces(data=F_np, ids=ids, fs=fs) if F_np is not None else None
+    )
 
 
 def _resolve_rois(rois):
@@ -377,7 +384,7 @@ def extract_from_svd(
         raise ValueError("Neuropil annuli require W as (H,W,K) to perform dilation")
     annuli = _build_annuli(W, neuropil_range, all_roi_mask, exclusion_threshold)
 
-    # Compute neuropil from SVD (needed for both OLS and simple summation)
+    # Compute neuropil from SVD
     if annuli is not None:
         F_np = _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size)
 
@@ -391,7 +398,6 @@ def extract_from_svd(
             mean_image_norm = None
 
         # Build design matrix and pseudo-inverse
-        print(W_act.shape)
         design, weights_dict = _finalize_design(W_act, mean_image_norm)
         design_pinv = np.linalg.pinv(design).astype(np.float32)
 
@@ -406,21 +412,25 @@ def extract_from_svd(
             C, weights_dict, F_np if annuli is not None else None, keep_mean=keep_mean
         )
     else:
-        # Simple weighted summation (still with neuropil subtraction)
+        # Simple weighted summation
         # F[k, t] = sum_p(W_act[p, k] * Y[t, p]) - F_np[k, t]
         # Using SVD: Y = U @ diag(S) @ Vt, so sum over active pixels:
         # F[k, :] = W_act[:, k].T @ Vt_act.T @ diag(S) @ U.T
         Vt_act = Vt_flat[:, active_idx]  # (R, P_active)
         proj = W_act.T @ Vt_act.T  # (K, R)
         F = (proj * S) @ U.T  # (K, T)
-        F = F - F_np
+        if annuli is not None:
+            F = F - F_np
 
     if normalize:
         baseline = np.median(F, axis=1, keepdims=True)
         baseline[baseline == 0] = 1.0
         F = 100.0 * (F - baseline) / baseline
 
-    return F.astype(np.float32)
+    return (
+        F.astype(np.float32),
+        F_np.astype(np.float32) if annuli is not None else None
+    )
 
 
 def _validate_params(neuropil_range, bg_smooth_size, exclusion_threshold):
@@ -452,11 +462,12 @@ def _active_and_flatten(W):
     return active_idx, W_act
 
 
-def _apply_uniform_weights(W_act):
+def _apply_uniform_weights(W_act, norm='L1'):
     """Replace weights with uniform weights normalized by L2 norm.
 
-    For each ROI k, sets all nonzero weights to 1/sqrt(n_pixels_k).
-    This makes the weighted sum equivalent to a normalized average.
+    For each ROI k, sets all nonzero weights to 1/sqrt(n_pixels_k) or
+    1/n_pixels_k, making the weighted sum equivalent to a normalized
+    average.
     """
     W_uniform = np.zeros_like(W_act)
     K = W_act.shape[1]
@@ -464,7 +475,10 @@ def _apply_uniform_weights(W_act):
         mask = W_act[:, k] > 0
         n_pixels = np.sum(mask)
         if n_pixels > 0:
-            W_uniform[mask, k] = 1.0 / np.sqrt(n_pixels)
+            if norm == 'L1':
+                W_uniform[mask, k] = 1.0 / n_pixels
+            elif norm == 'L2':
+                W_uniform[mask, k] = 1.0 / np.sqrt(n_pixels)
     return W_uniform
 
 
@@ -494,7 +508,7 @@ def _build_annuli(W, neuropil_range, all_roi_mask, exclusion_threshold):
     return annuli
 
 
-def _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size):
+def _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size, norm='L1'):
     """Compute neuropil traces from SVD components."""
     T = U.shape[0]
     F_np = np.zeros((K, T), dtype=np.float32)
@@ -506,6 +520,10 @@ def _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size):
         # mean(Y[:, idx], axis=1) = U @ diag(S) @ mean(Vt[:, idx], axis=1)
         Vt_annulus_mean = Vt_flat[:, idx].mean(axis=1)
         F_np[k, :] = U @ (S * Vt_annulus_mean)
+        if norm == 'L2':
+            F_np[k, :] *= np.sqrt(len(idx))
+        elif norm != 'L1':
+            raise ValueError(f"Unsupported norm {norm} in _compute_neuropil_svd")
 
     if bg_smooth_size > 0:
         for k in range(K):
