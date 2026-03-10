@@ -1,112 +1,11 @@
 """QC helpers for timeseries analysis and plotting."""
 
 import numpy as np
-import awkward as ak
-
-
-def rolling_window(data, window_size_ms, fs, window_hop_ms=None, pad=False):
-    """Create rolling windows from time-series data.
-
-    Parameters
-    ----------
-    data : ndarray, shape (..., T)
-        Input time-series array with arbitrary leading dimensions and a final
-        time dimension of length T.
-    window_size_ms : float or int
-        Window length in milliseconds.
-    fs : float
-        Sampling frequency in Hz (frames per second).
-    window_hop_ms : float or int, optional
-        Step between successive windows in milliseconds. If ``None``, defaults
-        to ``window_size_ms`` (non-overlapping windows).
-    pad : bool, optional
-        If True, pad the windows output along the n_steps axis with NaN slices
-        (half_win on each side) so its length matches the original number of
-        timepoints T, and return times = np.arange(T) / fs. If False (default),
-        existing behavior unchanged.
-
-    Returns
-    -------
-    windows : ndarray, shape (..., n_steps, W) or (..., T, W) if pad=True
-        Windowed views of the input data along the last axis. ``W`` is the
-        window length in samples (frames), and ``n_steps`` is the number of
-        windows extracted (or T when pad=True).
-    times : ndarray, shape (n_steps,)
-        Center times for each extracted window, in seconds.
-    """
-    # convert ms → frames; ensure odd window size
-    window_size_frames = int(round(float(window_size_ms) * float(fs) / 1000.0))
-    if window_size_frames <= 0:
-        raise ValueError("window_size_ms too small; results in 0 frames")
-    # make window size odd
-    if window_size_frames % 2 == 0:
-        window_size_frames += 1
-    half_win = window_size_frames // 2
-
-    if window_hop_ms is None:
-        window_hop_ms = window_size_ms
-    hop_frames = int(round(float(window_hop_ms) * float(fs) / 1000.0))
-    if hop_frames < 1:
-        hop_frames = 1
-
-    # sliding window view along last axis
-    windows_all = np.lib.stride_tricks.sliding_window_view(data, window_size_frames, axis=-1)
-    # subsample along the window-step axis (second-to-last)
-    if hop_frames > 1:
-        windows = windows_all[..., ::hop_frames, :]
-    else:
-        windows = windows_all
-
-    T = data.shape[-1]
-    center_idxs = np.arange(half_win, T - half_win, hop_frames)
-    if pad:
-        # create padded windows of length T along the step axis, fill with NaN
-        padded_shape = windows.shape[:-2] + (T, window_size_frames)
-        padded_windows = np.full(padded_shape, np.nan, dtype=float)
-        # assign windows at their center indices (cast to float to allow NaN)
-        padded_windows[..., center_idxs, :] = windows.astype(float)
-        times = np.arange(T) / float(fs)
-        return padded_windows, times
-
-    times = np.arange(T)[half_win : T - half_win : hop_frames] / float(fs)
-
-    return windows, times
-
-
-def embed_events(values, spike_frames, n_frames):
-    """Embed per-event values into dense per-ROI time series.
-
-    Parameters
-    ----------
-    values : ak.Array, shape (n_rois, <n_events>)
-        Awkward array of scalar event values for each ROI; ``<n_events>``
-        denotes a variable-length inner dimension (events per ROI).
-    spike_frames : ak.Array, shape (n_rois, <n_events>)
-        Awkward array of integer frame indices corresponding to events in
-        ``values``. Indices are in the range ``[0, n_frames-1]``.
-    n_frames : int
-        Length of the output time axis (number of frames).
-
-    Returns
-    -------
-    out : ndarray, shape (n_rois, n_frames)
-        Dense NumPy array with embedded event values at their corresponding
-        frame indices and ``np.nan`` elsewhere.
-    """
-    # values: ak array (n_rois, <n_events>) of scalars
-    # spike_frames: ak array (n_rois, <n_events>) of int frame indices
-    n_rois = len(values)
-    out = np.full((n_rois, n_frames), np.nan, dtype=float)
-
-    for i in range(n_rois):
-        # get indices and values for ROI i
-        idxs = spike_frames[i].to_list()
-        if len(idxs) == 0:
-            continue
-        vals = values[i].to_numpy()
-        out[i, idxs] = vals
-
-    return out
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import mplutil.util as vu
+from matplotlib import ticker
 
 
 def plot_distribution(ax, t, data, label=None, color=".7", mean_color="k"):
@@ -137,7 +36,7 @@ def plot_distribution(ax, t, data, label=None, color=".7", mean_color="k"):
     """
     # data: (n, time) array, may contain nan; reduce across axis=0
     mean = np.nanmean(data, axis=0)
-    q0, q25, q75, q100 = np.nanquantile(data, [0, .25, .75, 1], axis=0)
+    q0, q25, q75, q100 = np.nanquantile(data, [0, 0.25, 0.75, 1], axis=0)
     # labels: prefix with provided label if given
     iqr_label = f"{label} IQR" if label else "IQR"
     avg_label = f"{label} Avg." if label else "Avg."
@@ -148,3 +47,170 @@ def plot_distribution(ax, t, data, label=None, color=".7", mean_color="k"):
     ax.plot(t, q100, color=color, ls="--", lw=0.5)
     # plot mean line
     ax.plot(t, mean, color=mean_color, label=avg_label)
+
+
+def plot_binned_metric(
+    binned_df: pd.DataFrame, col: str, ax=None, colors: dict = None, ylabel: str = None
+):
+    """Plot per-bin metric points colored by ROI with a smoothed rolling mean line per (session, roi_id).
+
+    Parameters
+    ----------
+    binned_df : pandas.DataFrame
+        DataFrame with columns including ['session','roi_id','bin_time_s', ...].
+    col : str
+        Column name in binned_df to plot on the y-axis.
+    ax : matplotlib.axes.Axes or None
+        Axes to draw on. If None, a new figure/axes is created.
+    colors : dict or None
+        Mapping {(session, roi_id): color}. If None, colors are assigned from tab10.
+    ylabel : str or None
+        Y-axis label; defaults to col if None.
+
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+        Axes with the plot.
+    """
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    df = binned_df.copy()
+    if df.empty:
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(ylabel or col)
+        return ax
+
+    session_roi_ids = df[['session', "roi_id"]].drop_duplicates()
+    # build colors mapping if not provided
+    if colors is None:
+        n_colors = session_roi_ids.shape[0]
+        pal = sns.color_palette("tab10", n_colors)
+        colors = {
+            (row['session'], row['roi_id']): pal[i]
+            for i, (_, row) in enumerate(session_roi_ids.iterrows())
+        }
+
+    # lineplot per (session, roi_id)
+    grouped = df.groupby(["session", "roi_id"])
+    for (sess, rid), g in grouped:
+        g_sorted = g.sort_values("bin_time_s")
+        clr = colors.get((sess, rid), '.7')
+        if g_sorted.shape[0] == 0:
+            continue
+        ax.plot(g_sorted["bin_time_s"], g_sorted[col], color=clr, lw=1)
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(ylabel or col)
+    return ax
+
+
+def plot_spike_metric(
+    spike_df: pd.DataFrame,
+    col: str,
+    ax=None,
+    colors: dict = None,
+    ylabel: str = None,
+    window_size_s=5,
+):
+    """Plot per-spike metric points colored by ROI with a smoothed rolling mean per (session, roi_id).
+
+    Parameters
+    ----------
+    spike_df : pandas.DataFrame
+        DataFrame with columns including ['session','roi_id','spike_time_s', ...].
+    col : str
+        Column name in spike_df to plot on the y-axis.
+    ax : matplotlib.axes.Axes or None
+        Axes to draw on. If None, a new figure/axes is created.
+    colors : dict or None
+        Mapping {roi_id: color}. If None, colors are assigned from tab10.
+    ylabel : str or None
+        Y-axis label; defaults to col if None.
+
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+        Axes with the plot.
+    """
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    df = spike_df.copy()
+    if df.empty:
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(ylabel or col)
+        return ax
+
+    session_roi_ids = df[['session', "roi_id"]].drop_duplicates()
+    # build colors mapping if not provided
+    if colors is None:
+        pal = sns.color_palette("tab10", len(session_roi_ids))
+        colors = {
+            (row['session'], row['roi_id']): pal[i]
+            for i, (_, row) in enumerate(session_roi_ids.iterrows())
+        }
+
+    # rolling mean per (session, roi_id)
+    grouped = df.groupby(["session", "roi_id"])
+    for (sess, rid), g in grouped:
+        # covert index to datetime (in seconds)
+        seconds_index = pd.to_datetime(g["spike_time_s"], unit='s')
+        g = g.set_index(seconds_index)
+        clr = colors.get((sess, rid), '.7')
+        if g.shape[0] == 0:
+            continue
+
+        # scatter: each spike
+        g_smooth_s = g.index.astype(np.int64) / 1e9
+        ax.scatter(g_smooth_s, g[col], color=clr, s=10, alpha=0.8)
+
+        # lineplot: rolling mean
+        y_smooth = (
+            g[col]
+            .rolling(f"{window_size_s}s", min_periods=2)
+            .mean()
+        )
+        # convert index back to float seconds for plotting
+        y_smooth_s = y_smooth.index.astype(np.int64) / 1e9
+        ax.plot(y_smooth_s, y_smooth, color=clr, lw=1)
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(ylabel or col)
+    return ax
+
+
+def plot_bleaching_rates(rates_df: pd.DataFrame, ax=None):
+    """Plot bleaching rate swarm and histogram overlay for mean_F log fits.
+
+    Parameters
+    ----------
+    rates_df : pandas.DataFrame
+        DataFrame with columns ['session','roi_id','metric','fit_type','slope',...].
+    ax : matplotlib.axes.Axes or None
+        Axes to draw on. If None, a new figure/axes is created.
+
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+        Axes with the plot.
+    """
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    sel = rates_df[(rates_df["metric"] == "mean_F") & (rates_df["fit_type"] == "log")]
+    slopes = sel["slope"].dropna()
+    if slopes.size == 0:
+        return ax
+
+    sns.swarmplot(x=slopes, orient="h", ax=ax, color="k", size=3)
+    hist, bins = np.histogram(slopes, bins=20)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    ax.bar(bin_centers, hist, width=(bins[1] - bins[0]), color=".8")
+
+    ax.set_ylim(-0.5, max(hist) + 0.5)
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True, nbins=2))
+    ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+    ax.set_xlabel("Bleaching rate (slope)")
+
+    return ax

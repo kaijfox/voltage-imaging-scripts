@@ -3,37 +3,34 @@
 import numpy as np
 from numpy.fft import fft2, ifft2, fftshift
 from scipy.ndimage import gaussian_filter
+from typing import Tuple
 
 from .svd_video import SVDVideo
+from ..cli.common import configure_logging
+
+logger, (error, warning, info, debug) = configure_logging("motion")
 
 
-def preprocess_basis_for_alignment(Vt: np.ndarray, mode: str = "voltage") -> np.ndarray:
+def preprocess_basis_for_alignment(Vt: np.ndarray, hpf_px = 50., sharp_px=1., amount=100.) -> np.ndarray:
     """
     Apply spatial preprocessing to each basis vector for shift estimation.
+
+    spatial highpass (subtract Gaussian sigma=50) + unsharp filter
 
     Parameters
     ----------
     Vt : array (rank, H, W)
-    mode : str
-        'voltage' -> highpass (subtract Gaussian sigma=50) + unsharp masking
 
     Returns
     -------
     array (rank, H, W)
     """
-    # for each j: highpass = Vt[j] - gaussian_filter(Vt[j], sigma=50)
-    # unsharp = highpass + 100 * (gaussian_filter(highpass, sigma=2) - gaussian_filter(highpass, sigma=1))
-    # stack and return
     Vt = np.asarray(Vt)
-    if mode != "voltage":
-        return Vt.copy()
-    processed = []
-    for j in range(Vt.shape[0]):
-        v = Vt[j].astype(np.float64)
-        highpass = v - gaussian_filter(v, sigma=50)
-        unsharp = highpass + 100.0 * (gaussian_filter(highpass, sigma=2) - gaussian_filter(highpass, sigma=1))
-        processed.append(unsharp)
-    return np.stack(processed, axis=0)
+    highpass = Vt - gaussian_filter(Vt, sigma=hpf_px, axes=(1, 2))
+    sharpen_wide  = gaussian_filter(highpass, sigma=2*sharp_px, axes=(1, 2))
+    sharpen_small = gaussian_filter(highpass, sigma=  sharp_px, axes=(1, 2))
+    sharpened = highpass + amount * (sharpen_wide - sharpen_small)
+    return sharpened
 
 
 def compute_basis_ffts(Vt: np.ndarray) -> np.ndarray:
@@ -73,17 +70,18 @@ def compute_reference_spectrum(Vhat: np.ndarray, w_ref: np.ndarray) -> np.ndarra
 
 
 def estimate_shifts(
-    W: np.ndarray,
+    codes: np.ndarray,
     Vhat: np.ndarray,
     R: np.ndarray,
     max_shift: int | None = None,
+    batch_limit: int = 4000 * 4000,
 ) -> np.ndarray:
     """
     Per-frame integer shifts via latent-space phase correlation.
 
     Parameters
     ----------
-    W : array (T, rank)
+    codes : array (T, rank)
         Temporal weights per frame: U * S[None, :].
     Vhat : array (rank, H, W) complex
         Preprocessed basis FFTs.
@@ -92,6 +90,10 @@ def estimate_shifts(
         conj(fft2(preprocessed_pixel_reference))).
     max_shift : int or None
         Clip cross-correlation search window to ±max_shift pixels.
+    batch_limit : int
+        Maximum number of complex elements in the cross-spectrum batch
+        (T_batch, H, W). batch_size is set so the batch stays within
+        this limit; minimum batch_size is 1.
 
     Returns
     -------
@@ -101,29 +103,34 @@ def estimate_shifts(
     rank = Vhat.shape[0]
     H = Vhat.shape[1]
     Wpix = Vhat.shape[2]
-    # Flatten spatial dims
-    Vhat_flat = Vhat.reshape(rank, -1)  # (rank, H*W)
-    # frame_spectra_flat: (T, H*W)
-    frame_spectra_flat = W.dot(Vhat_flat)
-    frames_spec = frame_spectra_flat.reshape(W.shape[0], H, Wpix)
-    # multiply by reference spectrum R
-    cross_spec = frames_spec * R[None, :, :]
-    # inverse FFT to get cross-correlation surfaces
-    cc = np.abs(ifft2(cross_spec))
-    # fftshift each frame's cc so center is at (H//2, W//2)
-    cc_shifted = fftshift(cc, axes=(-2, -1))
-    # find peaks in unconstrained CC
-    T = cc_shifted.shape[0]
-    flat = cc_shifted.reshape(T, -1)
-    idx = np.argmax(flat, axis=1)
-    peak_rows, peak_cols = np.unravel_index(idx, (H, Wpix))
+    T = codes.shape[0]
+    HW = H * Wpix
     center = (H // 2, Wpix // 2)
-    shifts_out = np.vstack([peak_rows - center[0], peak_cols - center[1]]).T
+
+    batch_size = max(1, batch_limit // HW)
+
+    Vhat_flat = Vhat.reshape(rank, -1)  # (rank, H*W)
+    shifts_out = np.empty((T, 2), dtype=int)
+
+    for start in range(0, T, batch_size):
+        end = min(start + batch_size, T)
+        W_batch = codes[start:end]  # (B, rank)
+        # (B, H, W)
+        frames_spec = W_batch.dot(Vhat_flat).reshape(end - start, H, Wpix)
+        cross_spec = frames_spec * R[None, :, :]
+        cc_shifted = fftshift(np.abs(ifft2(cross_spec)), axes=(-2, -1))
+        flat = cc_shifted.reshape(end - start, -1)
+        idx = np.argmax(flat, axis=1)
+        peak_rows, peak_cols = np.unravel_index(idx, (H, Wpix))
+        shifts_out[start:end, 0] = peak_rows - center[0]
+        shifts_out[start:end, 1] = peak_cols - center[1]
+        
+
     if max_shift is not None:
         # Zero out shifts whose magnitude exceeds max_shift (unreliable / too large)
         magnitude = np.sqrt(shifts_out[:, 0] ** 2 + shifts_out[:, 1] ** 2)
         shifts_out[magnitude > max_shift] = 0
-    return shifts_out.astype(int)
+    return shifts_out
 
 
 def compute_shifted_mean_image(video: SVDVideo, shifts: np.ndarray) -> np.ndarray:
@@ -183,6 +190,7 @@ def expand_and_orthogonalize_1d(
     video: SVDVideo,
     shifts_1d: np.ndarray,
     axis: int,
+    max_rank=None,
 ) -> SVDVideo:
     """
     Apply 1D integer shifts along one axis by expanding the SVD basis, then orthogonalize.
@@ -193,13 +201,13 @@ def expand_and_orthogonalize_1d(
         Vt must be (rank, H, W).
     shifts_1d : array (T,) int
         Per-frame shift along the specified axis.
-    axis : int
-        0 for rows (vertical), 1 for columns (horizontal).
+    axis : 'row' or 'col'
+        'row' for rows (vertical), 'col' for columns (horizontal).
 
     Returns
     -------
     SVDVideo
-        Orthogonalized; rank up to original_rank × n_unique_shifts.
+        Orthogonalized; rank up to original_rank * n_unique_shifts.
     """
     from scipy.linalg import qr, svd as scipy_svd
 
@@ -213,41 +221,56 @@ def expand_and_orthogonalize_1d(
     K = unique_s.size
     # If all shifts are zero (single unique shift zero), return original
     if K == 1 and int(unique_s[0]) == 0:
-        return SVDVideo(U_arr.copy(), S_arr.copy(), Vt_arr.copy(), orthonormal=video.orthonormal)
+        return SVDVideo(
+            U_arr.copy(), S_arr.copy(), Vt_arr.copy(), orthonormal=video.orthonormal
+        )
+
     # Build expanded Vt by rolling for each unique shift
     Vt_blocks = []
     for s in unique_s:
-        dy = int(s) if axis == 0 else 0
-        dx = int(s) if axis == 1 else 0
+        dy = int(s) if axis == 'row' else 0
+        dx = int(s) if axis == 'col' else 0
         Vt_blocks.append(roll_basis(Vt_arr, dy, dx))
     Vt_expanded = np.concatenate(Vt_blocks, axis=0).astype(np.float64)  # (r*K, H, W)
     Vt_flat = Vt_expanded.reshape(r * K, -1)  # (r*K, H*W)
+
     # Build expanded U (block-sparse: frame i contributes to group k only)
     U_expanded = np.zeros((T, r * K), dtype=np.float64)
     for k in range(K):
         mask_k = (inverse == k)[:, None]
         U_expanded[:, k * r : (k + 1) * r] = U_arr * mask_k
     S_expanded = np.tile(S_arr, K)
+
     # QR-SVD: numerically stable orthogonalization via double QR
     # M = U_expanded @ diag(S_expanded) @ Vt_flat = A @ Vt_flat
     A = U_expanded * S_expanded[None, :]  # (T, r*K), absorb S into U
-    Q_A, R_A = qr(A, mode='economic')    # Q_A (T, r*K), R_A (r*K, r*K)
-    C = R_A @ Vt_flat                    # (r*K, H*W)
-    Q_B, R_B = qr(C.T, mode='economic') # Q_B (H*W, r*K), R_B (r*K, r*K)
-    # M = Q_A @ R_B.T @ Q_B.T  →  SVD of R_B.T
+    Q_A, R_A = qr(A, mode="economic")  # Q_A (T, r*K), R_A (r*K, r*K)
+    C = R_A @ Vt_flat  # (r*K, H*W)
+    Q_B, R_B = qr(C.T, mode="economic")  # Q_B (H*W, r*K), R_B (r*K, r*K)
+    
+    # Limit to max_rank
+    if max_rank is not None:
+        rA, rB = np.linalg.matrix_rank(R_A), np.linalg.matrix_rank(R_B)
+        new_rank = min(max_rank, min(rA, rB))
+        Q_A, R_A = Q_A[:, :new_rank], R_A[:new_rank]
+        Q_B, R_B = Q_B[:, :new_rank], R_B[:new_rank]
+    new_rank = R_B.shape[0]
+    
+    # M = Q_A @ R_B.T @ Q_B.T  →  SVD of R_B'
     U_small, Sigma, Vt_small = scipy_svd(R_B.T, full_matrices=False)
-    U_new = Q_A @ U_small               # (T, r*K) orthonormal
-    Vt_flat_new = Vt_small @ Q_B.T      # (r*K, H*W) orthonormal
-    Vt_new = Vt_flat_new.reshape(r * K, H, W)
+    U_new = Q_A @ U_small  # (T, new_r) orthonormal
+    Vt_flat_new = Vt_small @ Q_B.T  # (new_r, H*W) orthonormal
+    Vt_new = Vt_flat_new.reshape(new_rank, H, W)
+    
     # Drop near-zero singular value components
-    thresh = Sigma[0] * np.finfo(np.float64).eps * max(T, r * K)
+    thresh = Sigma[0] * np.finfo(np.float64).eps * max(T, new_rank)
     keep = Sigma > thresh
     return SVDVideo(U_new[:, keep], Sigma[keep], Vt_new[keep], orthonormal=True)
 
 
 def apply_shifts_lowrank(video: SVDVideo, shifts: np.ndarray) -> SVDVideo:
     """
-    Apply 2D integer shifts to SVDVideo in low-rank form, separately per axis.
+    Apply 2D integer shifts to SVDVideo.
 
     Parameters
     ----------
@@ -261,8 +284,8 @@ def apply_shifts_lowrank(video: SVDVideo, shifts: np.ndarray) -> SVDVideo:
     SVDVideo
         Orthogonalized.
     """
-    result = expand_and_orthogonalize_1d(video, shifts[:, 1], axis=1)
-    result = expand_and_orthogonalize_1d(result, shifts[:, 0], axis=0)
+    result = expand_and_orthogonalize_1d(video, shifts[:, 1], axis='col')
+    result = expand_and_orthogonalize_1d(result, shifts[:, 0], axis='row')
     return result
 
 
@@ -287,6 +310,7 @@ def inpaint_basis(
     array (rank, H, W)
     """
     import cv2
+
     cv2_flag = cv2.INPAINT_NS if method == "ns" else cv2.INPAINT_TELEA
     mask_u8 = mask.astype(np.uint8)
     # If no masked pixels, return original unchanged
@@ -304,17 +328,22 @@ def inpaint_basis(
         v_norm = (v - minv) / (maxv - minv)
         v_in = v_norm.astype(np.float32)
         inpainted = cv2.inpaint(v_in, mask_u8, 3, cv2_flag)
-        out[j] = (inpainted.astype(np.float64) * (maxv - minv) + minv).astype(Vt_arr.dtype)
+        out[j] = (inpainted.astype(np.float64) * (maxv - minv) + minv).astype(
+            Vt_arr.dtype
+        )
     return out
 
 
 def motion_correct_svd(
     video: SVDVideo,
-    mode: str = "voltage",
     max_shift: int | None = None,
     n_passes: int = 2,
     mask: np.ndarray | None = None,
-) -> SVDVideo:
+    hpf_px: float = 10.,
+    sharp_px: float = 1.,
+    sharp_amount: float = 100.,
+    max_rank: int | None = None,
+) -> Tuple[SVDVideo, np.ndarray]:
     """
     Full two-pass SVD motion correction pipeline.
 
@@ -336,23 +365,67 @@ def motion_correct_svd(
     SVDVideo
         Orthogonalized motion-corrected video.
     """
-    # Optionally inpaint occluding mask first
     vid = video
+
+    # Optionally truncate rank
+    if max_rank is not None:
+        info(f"Truncating to rank {max_rank}.")
+        vid = SVDVideo(
+            vid.U[:, :max_rank],
+            vid.S[:max_rank],
+            vid.Vt[:max_rank],
+            orthonormal=vid.orthonormal,
+        )
+
+    # Optionally inpaint occluding mask first
     if mask is not None:
+        info(f"Inpainting {mask.sum()} pixels.")
         Vt_inp = inpaint_basis(np.asarray(video.Vt), mask)
-        vid = SVDVideo(np.asarray(video.U).copy(), np.asarray(video.S).copy(), Vt_inp, orthonormal=False)
+        vid = SVDVideo(
+            np.asarray(video.U).copy(),
+            np.asarray(video.S).copy(),
+            Vt_inp,
+            orthonormal=False,
+        )
+        
+
     # Preprocess bases and compute FFTs
-    Vt_proc = preprocess_basis_for_alignment(np.asarray(vid.Vt), mode)
-    Vhat = compute_basis_ffts(Vt_proc)
-    Wmat = np.asarray(vid.U) * np.asarray(vid.S)[None, :]
-    w_ref = np.mean(Wmat, axis=0)
-    R = compute_reference_spectrum(Vhat, w_ref)
-    shifts = estimate_shifts(Wmat, Vhat, R, max_shift)
-    if n_passes > 1:
-        mean_img = compute_shifted_mean_image(vid, shifts)
-        mean_proc = preprocess_basis_for_alignment(mean_img[None, :, :], mode)[0]
-        R2 = np.conj(fft2(mean_proc))
-        shifts = estimate_shifts(Wmat, Vhat, R2, max_shift)
+    info("Computing spatial basis.")
+    preproc_kw = dict(hpf_px=hpf_px, sharp_px=sharp_px, amount=sharp_amount)
+    Vt_hp = preprocess_basis_for_alignment(vid.Vt, **preproc_kw)
+    Vhat = compute_basis_ffts(Vt_hp)
+    frame_codes = np.asarray(vid.U) * np.asarray(vid.S)[None, :]
+
+    # Always first pass: uncorrected temporal mean as reference image
+    code_ref = np.mean(frame_codes, axis=0)
+    R = compute_reference_spectrum(Vhat, code_ref)
+    info("Estimating shifts.")
+    shifts = estimate_shifts(frame_codes, Vhat, R, max_shift)
+    all_shifts = [shifts]
+
+    mean_shift = shifts.mean(axis=0)
+    info(f"Avg.: row={mean_shift[0]:.2f}, col={mean_shift[1]:.2f}")
+
+    # Multi-pass motion correction:
+    # Recompute reference from shifted mean image
+    for i in range(n_passes - 1):
+        info(f"Multi-pass iteration {i + 2}:")
+        all_shifts.append(shifts)
+        mean_img = compute_shifted_mean_image(vid, shifts[-1])
+        mean_proc = preprocess_basis_for_alignment(mean_img[None, :, :])[0]
+        R = np.conj(fft2(mean_proc))
+        info("Estimating shifts.")
+        shifts = estimate_shifts(frame_codes, Vhat, R, max_shift)
+
+        mean_shift = shifts.mean(axis=0)
+        info(f"Avg.: row={mean_shift[0]:.2f}, col={mean_shift[1]:.2f}")
+
     # Negate: estimate_shifts returns the displacement of each frame;
-    # apply_shifts_lowrank rolls bases forward, so we roll by -shifts to correct.
-    return apply_shifts_lowrank(vid, -shifts)
+    # apply_shifts_lowrank rolls bases forward, so we roll by -shifts to
+    # correct.
+    corrected = apply_shifts_lowrank(vid, -shifts)
+
+    if n_passes == 1:
+        return corrected, all_shifts[0]
+    else:
+        return corrected, all_shifts

@@ -3,6 +3,7 @@
 import click
 from pathlib import Path
 import time
+import numpy as np
 
 from .common import (
     input_output_options,
@@ -91,19 +92,20 @@ def convert(
         error(f"Conversion failed: {exc}")
         raise
 
+
 def _parse_slice(s):
     """Parse a string like '0:100' or '-100:' into a slice object.
-    
+
     Other valid arguments include
     - None -> slice(None)
     - 0:50,,0:100 -> (slice(0, 100), slice(None), slice(0, 100))"""
 
     # Empty or multiple slices
-    if s is None or s == '':
+    if s is None or s == "":
         return slice(None)
-    if ',' in s:
-        return tuple(_parse_slice(part) for part in s.split(','))
-    
+    if "," in s:
+        return tuple(_parse_slice(part) for part in s.split(","))
+
     parts = s.split(":")
     if len(parts) == 1:
         # Single index
@@ -113,6 +115,7 @@ def _parse_slice(s):
     stop = int(parts[1]) if len(parts) > 1 and parts[1] else None
     step = int(parts[2]) if len(parts) > 2 and parts[2] else None
     return slice(start, stop, step)
+
 
 @click.command()
 @input_output_options
@@ -147,14 +150,14 @@ def slice_cmd(
     temporal_slice = _parse_slice(temporal)
     component_slice = _parse_slice(component)
     spatial_slices = []
-    for s in (spatial or []):
+    for s in spatial or []:
         s = _parse_slice(s)
         spatial_slices.extend(s if isinstance(s, tuple) else [s])
 
     debug(f"Component slice: {component_slice}")
     debug(f"Temporal slice:  {temporal_slice}")
     debug(f"Spatial slice:   {spatial_slices}")
-    
+
     slice_svd_file(
         input_path=input_path,
         output_path=output_path,
@@ -239,8 +242,16 @@ def divisive_lowpass_cmd(
 
 @click.command()
 @input_output_options
-@click.option("-w", "--window-length", type=int, required=True, help="Savitzky-Golay window length (must be odd).",)
-@click.option("-p", "--polyorder", type=int, required=True, help="Polynomial order for filter.")
+@click.option(
+    "-w",
+    "--window-length",
+    type=int,
+    required=True,
+    help="Savitzky-Golay window length (must be odd).",
+)
+@click.option(
+    "-p", "--polyorder", type=int, required=True, help="Polynomial order for filter."
+)
 def sub_lowpass_cmd(input_path, output_path, window_length, polyorder):
     """Apply subtractive temporal low-pass filter to SVD video."""
     from ..io.svd_video import SVDVideo
@@ -265,6 +276,87 @@ def sub_lowpass_cmd(input_path, output_path, window_length, polyorder):
 
 
 @click.command()
+@input_output_options
+@click.option(
+    "--shifts_output",
+    type=click.Path(),
+    default=None,
+    help="Optional path to save estimated shifts as .csv file.",
+)
+@click.option(
+    "--rois",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to ROICollection (.mat) file.",
+)
+@click.option("--max-shift", type=int, default=None, help="Maximum shift (px).")
+@click.option("--n-passes", type=int, default=2, help="Number of passes.")
+@click.option(
+    "--hpf-px", type=float, default=10.0, help="High-pass filter width in px."
+)
+@click.option(
+    "--sharp-px", type=float, default=1.0, help="Sharpening kernel size in px."
+)
+@click.option("--sharp-amount", type=float, default=100.0, help="Sharpen amount.")
+@click.option("--max-rank", type=int, default=None, help="Maximum rank to retain.")
+def motion_correct_cmd(
+    input_path,
+    output_path,
+    shifts_output,
+    rois,
+    max_shift,
+    n_passes,
+    hpf_px,
+    sharp_px,
+    sharp_amount,
+    max_rank,
+):
+    """Apply motion correction to SVD video using SVD-based algorithm."""
+    from ..io.svd_video import SVDVideo
+    from ..io.motion_correction import motion_correct_svd
+    from ..timeseries.rois import ROICollection
+    from ..viz.rois import footprint_mask
+
+    logger, (error, warning, info, debug) = configure_logging("motion_correct")
+
+    info(f"Loading SVD from {input_path}")
+    video = SVDVideo.load(input_path)
+
+    mask = None
+    if rois:
+        artifact_rois = ROICollection.load(rois)
+        artifact_roi = artifact_rois[0]
+        mask = footprint_mask(artifact_rois.image_shape, artifact_roi.footprint)
+
+    corrected, shifts = motion_correct_svd(
+        video,
+        max_shift=max_shift,
+        n_passes=n_passes,
+        mask=mask,
+        hpf_px=hpf_px,
+        sharp_px=sharp_px,
+        sharp_amount=sharp_amount,
+        max_rank=max_rank,
+    )
+
+    info(f"Saving video to {output_path}")
+    corrected.save(output_path)
+    if shifts_output:
+        # Save only final shifts if multiple passes
+        if n_passes > 1:
+            shifts = shifts[-1]
+        info(f"Saving shifts to {shifts_output}")
+        np.savetxt(
+            shifts_output,
+            shifts,
+            delimiter=",",
+            header="est_row_shift,est_col_shift",
+        )
+
+    info("Done")
+
+
+@click.command()
 @click.argument("path", type=click.Path(exists=True))
 def svd_info(path):
     """Print info about an SVD video file."""
@@ -280,5 +372,3 @@ def svd_info(path):
         click.echo("\nAttributes:")
         for key, val in f.attrs.items():
             click.echo(f"  {key}: {val}")
-
-

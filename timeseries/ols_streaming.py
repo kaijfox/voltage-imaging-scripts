@@ -29,6 +29,7 @@ def extract_traces(
     ols=True,
     weighted=True,
     compute_mean=True,
+    remove_neuropil=True,
 ):
     """
     Extract ROI traces from video source.
@@ -69,11 +70,16 @@ def extract_traces(
         If False, use uniform weights normalized by L2 norm.
     compute_mean : bool, default True
         If True, compute and include mean image in the extraction.
+    remove_neuropil : bool, default True
+        If True, perform neuropil subtraction. If false, compute neuropil traces
+        but do not subtract.
 
     Returns
     -------
-    Traces
-        Extracted traces with shape (K, T).
+    traces: Traces
+        Extracted traces with data shape (K, T).
+    neuropil_traces: Traces or None
+        Extracted neuropil traces if neuropil_range is specified, else None.
     """
     # Import SVDVideo here to avoid circular import
     from ..io.svd_video import SVDVideo
@@ -129,6 +135,7 @@ def extract_traces(
                 ols=ols,
                 weighted=weighted,
                 compute_mean=compute_mean,
+                remove_neuropil=remove_neuropil,
             )
         elif has_video:
             # Streaming extraction from raw video
@@ -146,6 +153,7 @@ def extract_traces(
                 ols=ols,
                 weighted=weighted,
                 compute_mean=compute_mean,
+                remove_neuropil=remove_neuropil,
             )
             F_np = None
         else:
@@ -159,7 +167,7 @@ def extract_traces(
 
     return (
         Traces(data=F, ids=ids, fs=fs),
-        Traces(data=F_np, ids=ids, fs=fs) if F_np is not None else None
+        Traces(data=F_np, ids=ids, fs=fs) if F_np is not None else None,
     )
 
 
@@ -220,6 +228,7 @@ def extract_from_h5_video(
     ols=True,
     weighted=True,
     compute_mean=True,
+    remove_neuropil=True,
 ):
     """
     Extract ROI traces from H5 video file using streaming.
@@ -248,6 +257,9 @@ def extract_from_h5_video(
         If True, use ROI weights. If False, use uniform weights.
     compute_mean : bool, default True
         If True, compute and include mean image in the extraction.
+    remove_neuropil : bool, default True
+        If True, perform neuropil subtraction. If false, compute neuropil traces
+        but do not subtract.
 
     Returns
     -------
@@ -276,6 +288,7 @@ def extract_from_h5_video(
             ols=ols,
             weighted=weighted,
             compute_mean=compute_mean,
+            remove_neuropil=remove_neuropil,
         )
 
         # Precompute phase: accumulate mean image and neuropil
@@ -313,6 +326,7 @@ def extract_from_svd(
     weighted=True,
     compute_mean=True,
     keep_mean=True,
+    remove_neuropil=True,
 ):
     """
     Extract ROI traces from SVDVideo without reconstructing full frames.
@@ -342,6 +356,9 @@ def extract_from_svd(
     keep_mean : bool, default True
         If True, keep add the mean image contribution back to traces after
         estimating.
+    remove_neuropil : bool, default True
+        If True, perform neuropil subtraction. If false, compute neuropil traces
+        but do not subtract.
 
     Returns
     -------
@@ -409,7 +426,11 @@ def extract_from_svd(
 
         # Rescale and subtract neuropil
         F = _rescale_coefficients(
-            C, weights_dict, F_np if annuli is not None else None, keep_mean=keep_mean
+            C,
+            weights_dict,
+            F_np if annuli is not None else None,
+            keep_mean=keep_mean,
+            remove_neuropil=remove_neuropil,
         )
     else:
         # Simple weighted summation
@@ -419,7 +440,7 @@ def extract_from_svd(
         Vt_act = Vt_flat[:, active_idx]  # (R, P_active)
         proj = W_act.T @ Vt_act.T  # (K, R)
         F = (proj * S) @ U.T  # (K, T)
-        if annuli is not None:
+        if annuli is not None and remove_neuropil:
             F = F - F_np
 
     if normalize:
@@ -429,7 +450,7 @@ def extract_from_svd(
 
     return (
         F.astype(np.float32),
-        F_np.astype(np.float32) if annuli is not None else None
+        F_np.astype(np.float32) if annuli is not None else None,
     )
 
 
@@ -462,7 +483,7 @@ def _active_and_flatten(W):
     return active_idx, W_act
 
 
-def _apply_uniform_weights(W_act, norm='L1'):
+def _apply_uniform_weights(W_act, norm="L1"):
     """Replace weights with uniform weights normalized by L2 norm.
 
     For each ROI k, sets all nonzero weights to 1/sqrt(n_pixels_k) or
@@ -475,9 +496,9 @@ def _apply_uniform_weights(W_act, norm='L1'):
         mask = W_act[:, k] > 0
         n_pixels = np.sum(mask)
         if n_pixels > 0:
-            if norm == 'L1':
+            if norm == "L1":
                 W_uniform[mask, k] = 1.0 / n_pixels
-            elif norm == 'L2':
+            elif norm == "L2":
                 W_uniform[mask, k] = 1.0 / np.sqrt(n_pixels)
     return W_uniform
 
@@ -508,7 +529,7 @@ def _build_annuli(W, neuropil_range, all_roi_mask, exclusion_threshold):
     return annuli
 
 
-def _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size, norm='L1'):
+def _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size, norm="L1"):
     """Compute neuropil traces from SVD components."""
     T = U.shape[0]
     F_np = np.zeros((K, T), dtype=np.float32)
@@ -520,9 +541,9 @@ def _compute_neuropil_svd(Vt_flat, S, U, annuli, K, bg_smooth_size, norm='L1'):
         # mean(Y[:, idx], axis=1) = U @ diag(S) @ mean(Vt[:, idx], axis=1)
         Vt_annulus_mean = Vt_flat[:, idx].mean(axis=1)
         F_np[k, :] = U @ (S * Vt_annulus_mean)
-        if norm == 'L2':
+        if norm == "L2":
             F_np[k, :] *= np.sqrt(len(idx))
-        elif norm != 'L1':
+        elif norm != "L1":
             raise ValueError(f"Unsupported norm {norm} in _compute_neuropil_svd")
 
     if bg_smooth_size > 0:
@@ -562,7 +583,9 @@ def _finalize_design(W_act, mean_image_norm):
     return design, weights
 
 
-def _rescale_coefficients(C, weights, neuropil=None, keep_mean=False):
+def _rescale_coefficients(
+    C, weights, neuropil=None, keep_mean=False, remove_neuropil=True
+):
     """Rescale OLS coefficients to absolute fluorescence.
 
     Supports C with either (K+1, T) rows (ROI + background coeff) or (K, T)
@@ -585,7 +608,7 @@ def _rescale_coefficients(C, weights, neuropil=None, keep_mean=False):
     else:
         raise ValueError("Unexpected coefficient shape in _rescale_coefficients")
 
-    if neuropil is not None:
+    if neuropil is not None and remove_neuropil:
         F = F - neuropil
 
     return F.astype(np.float32)
@@ -606,6 +629,7 @@ class StreamingTimeSeriesExtractor:
         weighted=True,
         compute_mean=True,
         keep_mean=True,
+        remove_neuropil=True,
     ):
         _validate_params(neuropil_range, bg_smooth_size, exclusion_threshold)
         r_inner, r_outer = neuropil_range
@@ -619,6 +643,7 @@ class StreamingTimeSeriesExtractor:
         self.weighted = weighted
         self.compute_mean = compute_mean
         self.keep_mean = keep_mean
+        self.remove_neuropil = remove_neuropil
 
         # Determine shapes and store mask W (require float masks for OLS)
         self.W = W.astype(np.float32)
@@ -821,7 +846,7 @@ class StreamingTimeSeriesExtractor:
         """Compute simple weighted sum of pixels with neuropil subtraction."""
         # F[k, :] = W_act[:, k].T @ Y_batch_act - neuropil[k, :]
         F = self.W_act.T @ Y_batch_act  # (K, B)
-        if neuropil_batch is not None:
+        if neuropil_batch is not None and self.remove_neuropil:
             F = F - neuropil_batch
         return F.astype(np.float32)
 

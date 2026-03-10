@@ -1,12 +1,10 @@
-"""Spike analysis functions. See design/handoff/26-02-10_spike-fns.md for spec."""
-
-# Typing & docstrings: follow docs/code-style.md
 
 import numpy as np
 import awkward as ak
 
-from ..windows.ragged_ops import slice_by_events
 
+from ..windows.ragged_ops import slice_by_events
+from ..timeseries.events import Traces
 
 def ms_to_samples(ms, fs):
     return int(np.ceil(ms * fs / 1000))
@@ -228,3 +226,69 @@ def classify_events(trace_data, event_frames, fs, threshold_ms, mean_window_ms):
         "mean_diff": mean_diff,
         "dprime": dprime,
     }
+
+
+def events_to_trace(events, hop_ms, window_ms, fs, max_frame=None):
+    """Convert per-batch event frames into binned spike-count traces.
+
+    Purpose
+    -------
+    Produce a per-batch 2D numpy array of spike counts binned at anchors spaced by
+    `hop_ms` milliseconds. This routine builds anchors with
+    `anchors = np.arange(0, max_frame, hop)` where `hop = ms_to_samples(hop_ms, fs)`
+    and counts spikes that fall within the half-window around each anchor.
+
+    Behavior contract
+    -----------------
+    - Output shape is (*batch, n_bins) where n_bins = len(np.arange(0, max_frame, hop)).
+    - Counting: a spike at frame `t` contributes +1 to bin at anchor `a` iff
+      `t in [a - n_pre, a + n_post]` where `n_pre = n_post = ms_to_samples(window_ms/2, fs)`.
+    - Non-overlapping: when `hop_ms == window_ms` (so hop == window), a spike is
+      counted at most once across bins.
+    - Empty events: a batch item with no spikes produces an all-zero row.
+    - max_frame inference: if `max_frame` is None, it should be inferred from the
+      events (e.g., `int(ak.max(events.spike_frames))`) so that the output covers
+      at least the latest spike.
+
+    Parameters
+    ----------
+    events : awkward.Array-like
+        Per-batch ragged array of spike frame indices (e.g., ak.Array([[10,20], [5]])).
+    hop_ms : float
+        Spacing between bin centers in milliseconds.
+    window_ms : float
+        Full window width in milliseconds; half-window is used to compute n_pre/n_post.
+    fs : float
+        Sampling rate in samples per second (e.g., 1000 for 1 sample per ms).
+    max_frame : int or None, optional
+        Number of frames to cover; if None, infer from the events so the output
+        includes the latest spike.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer array of shape (*batch, n_bins) containing counts per bin.
+    """
+    hop = ms_to_samples(hop_ms, fs)
+    n_pre = n_post = ms_to_samples(window_ms / 2, fs)
+
+    # events.spike_frames is expected per-spec; accept either an object with that
+    # attribute or an awkward array directly.
+    spike_frames = getattr(events, "spike_frames", events)
+    spike_frames = ak.Array(spike_frames)
+
+    # Infer max_frame to include the latest spike (add 1 so range is inclusive)
+    if max_frame is None:
+        max_val = ak.max(spike_frames)
+        if max_val is None:
+            max_frame = 0
+
+    anchors_1d = np.arange(0, max_frame, hop)
+    anchors_wrapped = ak.Array([anchors_1d])
+
+    result = neighbor_events(anchors_wrapped, spike_frames, n_pre, n_post)
+    return Traces(
+        ak.to_numpy(ak.num(result, axis=-1)),
+        ids=events.ids if hasattr(events, "ids") else None,
+        fs=fs / hop,
+    )

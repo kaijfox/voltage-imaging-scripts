@@ -4,9 +4,12 @@ from typing import Any
 
 import numpy as np
 from scipy.signal import savgol_filter, convolve
+from scipy import ndimage
+import awkward as ak
 
 from .types import Events, Traces
 from ..cli.common import configure_logging
+from .qc_analysis import embed_events
 
 
 def detect_spikes(
@@ -47,7 +50,9 @@ def detect_spikes(
 
     # Compute baseline using Savitzky-Golay filter (2nd order)
     if sg_window_frames is not None:
-        baseline = savgol_filter(data, window_length=sg_window_frames, polyorder=2, axis=1)
+        baseline = savgol_filter(
+            data, window_length=sg_window_frames, polyorder=2, axis=1
+        )
         vmhigh = data - baseline
     else:
         info("Not applying high-pass filter! No window length specified.")
@@ -137,16 +142,16 @@ def detect_spikes(
         spike_frames=spike_frames_list,
         ids=traces.ids,
         detection_params={
-            'sg_window_frames': sg_window_frames,
-            'sd_threshold': sd_threshold,
-            'positive_going': positive_going,
+            "sg_window_frames": sg_window_frames,
+            "sd_threshold": sd_threshold,
+            "positive_going": positive_going,
         },
     )
 
     info = {
-        'baseline_noise': baseline_noise,
-        'spike_amplitudes': spike_amplitudes_list,
-        'spike_sbr': spike_sbr_list,
+        "baseline_noise": baseline_noise,
+        "spike_amplitudes": spike_amplitudes_list,
+        "spike_sbr": spike_sbr_list,
     }
 
     return hpf_traces, events, info
@@ -181,7 +186,7 @@ def despike(
         Estimated mean spike waveform per cell.
     """
     import awkward as ak
-    from ..windows.ragged_ops import slice_by_events
+    from ..windows.ragged_ops import slice_by_events, ak_infer_shape
 
     data = np.asarray(traces.data, dtype=float)
     n_cells, n_frames = data.shape
@@ -189,17 +194,17 @@ def despike(
 
     # (n_cells, <n_events>, window_len)
     windows = slice_by_events(data, events.spike_frames, n_pre, n_post)
-    waveforms = ak.mean(windows, axis=1).to_numpy()  # (n_cells, window_len)
+    waveforms = ak.mean(windows, axis=1)  # (n_cells, window_len)
 
     event_component = np.zeros_like(data)
     for i in range(n_cells):
         frames = np.asarray(events.spike_frames[i], dtype=int)
         valid = frames[(frames >= 0) & (frames < n_frames)]
-        if len(valid) == 0:
+        if not len(frames) or len(valid) == 0:
             continue
         event_component[i, valid] = 1.0
         event_component[i, n_post:-n_pre] = convolve(
-            event_component[i], waveforms[i], mode="valid"
+            event_component[i], np.asarray(waveforms[i]), mode="valid"
         )
 
     despiked = Traces(
@@ -208,3 +213,38 @@ def despike(
         fs=traces.fs,
     )
     return despiked, waveforms
+
+
+def despike_impute(
+    traces: Traces,
+    events: Events,
+    window_size: int,
+    savgol_window_frames: int,
+) -> Traces:
+    # build boolean valid mask (n_cells, n_frames), start all True
+    data = np.asarray(traces.data)
+    n_cells, n_frames = data.shape
+
+    # mark spike frames as invalid (False), clipping to valid frame range
+    nonspike_mask = ~embed_events(
+        ak.ones_like(events.spike_frames),
+        ak.Array(events.spike_frames),
+        n_frames,
+        fill_value=0,
+    ).astype(bool)
+
+    window_size += 1 - (window_size % 2)  # ensure odd window size
+    structure = np.ones([1, window_size], dtype=bool)
+    nonspike_mask = ndimage.binary_erosion(nonspike_mask, structure)
+
+    # smooth baseline with savgol_filter (polyorder=3) along time axis
+    savgol_window_frames += 1 - (savgol_window_frames % 2)
+    sav = savgol_filter(
+        data,
+        window_length=savgol_window_frames,
+        polyorder=2,
+        axis=-1,
+    )
+    imputed = np.where(nonspike_mask, data, sav)
+
+    return Traces(data=imputed, ids=traces.ids, fs=traces.fs)

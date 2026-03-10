@@ -915,7 +915,7 @@ def slice_by_events(trace_data, event_frames, n_pre, n_post):
     sampled = ak.where(valid_ixs[..., None], sampled_flat, ak.from_iter([None]))[..., 0]
 
     # Unflatten to original shapes
-    sampled = ak.unflatten(sampled_flat, ns, axis=0, highlevel=False)
+    sampled = ak.unflatten(sampled, ns, axis=0, highlevel=False)
     for i in range(len(batch_shape) - 1):
         tgt_shape = batch_shape[-i - 1]
         # Flatten target shape up to last axis if irregular, to match flat `sampled`

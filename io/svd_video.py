@@ -226,9 +226,9 @@ class SVDVideo:
         # If only indexed on time argument is a slice not a tuple
         if hasattr(idx, "start"):
             idx = (idx,)
-        time_idx, spatial_idx = idx[0], idx[1:]
+        time_idx, spatial_idx = idx[0], tuple(idx[1:])
         Usel = self.U[time_idx]
-        Vsel = self.Vt[:, *spatial_idx]
+        Vsel = self.Vt[(slice(None),) + spatial_idx]
 
         if Usel.ndim == 1:
             Uscaled = Usel * self.S
@@ -241,7 +241,7 @@ class SVDVideo:
 
     def reconstruct(self, time_idx, spatial_idx, rank_idx):
         Usel = self.U[time_idx, :][:, rank_idx]
-        Vsel = self.Vt[rank_idx][:, *spatial_idx]
+        Vsel = self.Vt[rank_idx][(slice(None),) + tuple(spatial_idx)]
         if Usel.ndim == 1:
             Uscaled = Usel * self.S[rank_idx]
             return (Vsel.T @ Uscaled[None].T).T[0]
@@ -353,7 +353,9 @@ class SVDVideo:
 
             conv_axes = tuple(range(1, arr.ndim))
 
-            debug(f"Convolving with scipy: {arr.shape} x {filters[0].reshape(full_kernel).shape} * {len(filters)}")
+            debug(
+                f"Convolving with scipy: {arr.shape} x {filters[0].reshape(full_kernel).shape} * {len(filters)}"
+            )
             debug(f"Padding: {padding}, pad_mode: {pad_mode}, pad_value: {pad_value}")
             out = np.stack(
                 [

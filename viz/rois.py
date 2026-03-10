@@ -1,7 +1,5 @@
 from ..timeseries.rois import ROICollection
-from ..io.svd_video import SVDVideo
 from ..timeseries.types import Traces, Events
-from ..roigui.roi import compute_boundary_edges
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,6 +8,11 @@ import scipy.stats
 from matplotlib.collections import LineCollection
 from matplotlib.patheffects import Stroke, Normal
 
+# SVDVideo contains some python 3.11-specific features
+try:
+    from ..io.svd_video import SVDVideo
+except SyntaxError:
+    pass
 
 def _ensure_axis(
     fig: Optional[plt.Figure],
@@ -74,7 +77,40 @@ def _infer_names_and_colors(
     return names, colors
 
 
-def mean_image(svd_video: SVDVideo) -> np.ndarray:
+def get_pixel_edges(r: int, c: int) -> tuple:
+    """Return the 4 edges of pixel (r, c) as corner coordinate pairs.
+
+    Corners of pixel (r, c): (r, c), (r, c+1), (r+1, c), (r+1, c+1)
+    Returns edges as (start_corner, end_corner) tuples, normalized so start < end.
+    """
+    return (
+        ((r, c), (r, c + 1)),      # top
+        ((r + 1, c), (r + 1, c + 1)),  # bottom
+        ((r, c), (r + 1, c)),      # left
+        ((r, c + 1), (r + 1, c + 1)),  # right
+    )
+
+
+def compute_boundary_edges(pixel_set: set) -> set:
+    """Compute all boundary edges from a set of pixel coordinates.
+
+    An edge is on the boundary iff exactly one of its adjacent pixels is in the set.
+    """
+    edge_counts = {}
+    for r, c in pixel_set:
+        for edge in get_pixel_edges(r, c):
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+    # Boundary edges appear exactly once (interior edges appear twice)
+    return {edge for edge, count in edge_counts.items() if count == 1}
+
+
+def footprint_mask(image_shape, footprint):
+    mask = np.zeros(image_shape, dtype=bool)
+    mask[footprint[:, 0], footprint[:, 1]] = True
+    return mask
+
+
+def mean_image(svd_video: "SVDVideo") -> np.ndarray:
     """Compute mean image in SVD video space.
 
     The mean image across time is computed without reconstructing full video by
@@ -474,7 +510,7 @@ def setup_video(
 
 def display_rois(
     roi_collection: ROICollection,
-    svd_video: SVDVideo = None,
+    svd_video: "SVDVideo" = None,
     target_gamma: Optional[float] = None,
     fig: Optional[plt.Figure] = None,
     axis: Optional[plt.Axes] = None,

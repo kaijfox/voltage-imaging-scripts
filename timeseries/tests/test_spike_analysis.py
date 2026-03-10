@@ -207,3 +207,65 @@ def test_ce_meta_returns():
     assert ak.num(res['counts'], axis=-1)[0] == 2
     assert ak.num(res['mean_diff'], axis=-1)[0] == 2
     assert ak.num(res['dprime'], axis=-1)[0] == 2
+
+
+# ====================================================== events_to_trace tests ====
+
+def test_events_to_trace_shape():
+    """Output shape matches (*batch, n_bins) using explicit max_frame."""
+    events = ak.Array([[10, 20], [5]])
+    fs = 1000
+    hop_ms = 10
+    window_ms = 5
+    max_frame = 31  # anchors: 0,10,20,30 => n_bins = 4
+    out = sa.events_to_trace(events, hop_ms, window_ms, fs, max_frame=max_frame)
+    assert out.shape == (2, 4)
+
+
+def test_events_to_trace_counting():
+    """A spike at t is counted in every anchor whose window includes t."""
+    events = ak.Array([[15]])
+    fs = 1000
+    hop_ms = 10
+    window_ms = 20  # half-window = 10 samples
+    max_frame = 31  # anchors 0,10,20,30 => n_bins = 4
+    out = sa.events_to_trace(events, hop_ms, window_ms, fs, max_frame=max_frame)
+    # expected counts for anchors [0,10,20,30] are [0,1,1,0]
+    assert np.array_equal(out[0], np.array([0, 1, 1, 0]))
+
+
+def test_events_to_trace_non_overlapping():
+    """When hop_ms == window_ms, each spike is counted at most once."""
+    events = ak.Array([[15]])
+    fs = 1000
+    hop_ms = 20
+    window_ms = 20
+    max_frame = 41  # anchors 0,20,40
+    out = sa.events_to_trace(events, hop_ms, window_ms, fs, max_frame=max_frame)
+    # sum across bins should be 1 for a single spike
+    assert out.sum() == 1
+
+
+def test_events_to_trace_empty_batch_row():
+    """A batch item with no spikes produces an all-zero row."""
+    events = ak.Array([[], [10]])
+    fs = 1000
+    hop_ms = 10
+    window_ms = 10
+    max_frame = 31
+    out = sa.events_to_trace(events, hop_ms, window_ms, fs, max_frame=max_frame)
+    assert np.all(out[0] == 0)
+
+
+def test_events_to_trace_max_frame_inference():
+    """When max_frame is None, output covers at least the latest spike."""
+    events = ak.Array([[95]])
+    fs = 1000
+    hop_ms = 10
+    window_ms = 10
+    out = sa.events_to_trace(events, hop_ms, window_ms, fs, max_frame=None)
+    hop = int(np.ceil(hop_ms * fs / 1000))
+    n_bins = out.shape[1]
+    last_anchor = (n_bins - 1) * hop
+    assert last_anchor >= 95
+

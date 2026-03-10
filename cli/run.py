@@ -2,7 +2,7 @@
 
 import click
 from .common import enable_logging
-from .io_commands import convert, slice_cmd, h5_convert, divisive_lowpass_cmd, sub_lowpass_cmd, svd_info
+from .io_commands import convert, slice_cmd, h5_convert, divisive_lowpass_cmd, sub_lowpass_cmd, motion_correct_cmd, svd_info
 from .ts_commands import extract_traces_cmd, trace_dff, detect_spikes_cmd
 
 @click.group()
@@ -21,6 +21,7 @@ def cli(ctx, verbose):
 # IO commmands
 cli.add_command(convert,                "convert")
 cli.add_command(h5_convert,             "h5-convert")
+cli.add_command(motion_correct_cmd,     "motion-correct")
 cli.add_command(slice_cmd,              "slice")
 cli.add_command(divisive_lowpass_cmd,   "video-dff")
 cli.add_command(sub_lowpass_cmd,        "video-sub-dff")

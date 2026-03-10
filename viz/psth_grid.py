@@ -2,7 +2,6 @@ from typing import Tuple
 from mplutil import util as vu
 import matplotlib.pyplot as plt
 
-from .rois import _ensure_axis
 from ..windows.ragged_ops import ak_infer_shape
 import numpy as np
 from matplotlib.collections import LineCollection

@@ -38,10 +38,12 @@ def filter_dff(
         raise ValueError(f"Unknown df/f filtering mode: {mode}")
 
     data = traces.data
+    
 
     if mode == "2exp":
         dff = np.zeros_like(data)
         baseline = np.zeros_like(data)
+        
         T = data.shape[1]
         time = np.arange(T)
         for i in range(data.shape[0]):
@@ -75,12 +77,12 @@ def filter_dff(
             dff[i] = data[i] / baseline[i]
 
     if mode == "savgol_add":
-        baseline[i] = signal.savgol_filter(data, window_length, polyorder, axis=1)
-        dff = data - baseline[i]
+        baseline = signal.savgol_filter(data, window_length, polyorder, axis=1)
+        dff = data - baseline
 
     if mode == "savgol_mult":
-        baseline[i] = signal.savgol_filter(data, window_length, polyorder, axis=1)
-        dff = data / baseline[i]
+        baseline = signal.savgol_filter(data, window_length, polyorder, axis=1)
+        dff = data / baseline
 
     return (
         Traces(dff, traces.ids, traces.fs),
