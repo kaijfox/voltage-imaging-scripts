@@ -10,6 +10,7 @@ from imaging_scripts.timeseries.analysis import pairwise_coherence, power_spectr
 
 import numpy as np
 import matplotlib.pyplot as plt
+import itertools as iit
 from scipy import ndimage
 from matplotlib import cm
 from pathlib import Path
@@ -109,39 +110,6 @@ def _determine_cmap_params(
     return _vmin, _vmax, _cmap
 
 
-
-
-
-def spatial_traces(
-    raw_video: SVDVideo,
-    mask: np.ndarray,           # bool (H, W)
-    grid_n: int = 8,
-    percentile: float = 90.,
-    closing_diameter: int = 5,
-    # extract_traces kwargs passed through
-    neuropil_range: tuple = None,
-    bg_smooth_size: int = 0,
-    fs: float = None,
-    # despike kwargs
-    sg_window_frames: int = None,
-    sd_threshold: float = 4.0,
-):
-    # Identify bright pixels and extract ROIs within grid
-    # mean_image = io.pipeline.svd_video_mean
-    # threshold = np.percentile(mean_image, percentile)
-    # struct = np.ones((closing_diameter, closing_diameter))
-    # mask = ndimage.binary_closing(mean_image >= threshold, structure=struct)
-    
-    # split spatial into (components, grid_n,  grid_n, cell_size, cell_size)
-    # H, W = mask.shape
-    # cell_size = floor(H / grid_n), floor(W / grid_n))
-    # Vt_grid = raw_video.Vt.reshape(...)
-    # 
-
-
-
-
-    pass
 
 
 

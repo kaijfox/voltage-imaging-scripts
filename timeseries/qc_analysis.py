@@ -179,15 +179,56 @@ def qc_trace_extraction_3(
         - "neuropil_component",
         - "raw_corrected", "hp_corrected"
     """
-    # Compute roi and neuropil raw using extract_traces with remove_neuropil=False
-    # -> raw, neuropil_raw
-    # Compute roi and neuropil dff with savgol_add
-    # -> hp, neuropil_hp, baseline, neuropil_baseline
-    # Regress neuropil dff out of roi dff (linear regression per roi)
-    # -> neuropil_component, hp_corrected
-    # Add baseline back
-    # -> raw_corrected
-    
+    # Extract raw soma and neuropil traces
+    raw, np_raw = extract_traces(
+        video,
+        soma_rois,
+        neuropil_range=neuropil_range,
+        ols=False,
+        weighted=False,
+        fs=fs,
+        remove_neuropil=False,
+    )
+
+    # High-pass filtering
+    dff_kw = dict(
+        mode="savgol_add",
+        window_length=ms_to_samples(hpf_ms, fs),
+        polyorder=2,
+    )
+    hp, baseline = filter_dff(raw, **dff_kw)
+    np_hp, np_baseline = filter_dff(np_raw, **dff_kw)
+
+    # Per-ROI linear regression of neuropil component onto ROI high-passed trace
+    n_rois = hp.data.shape[0]
+    np_component_data = np.zeros_like(hp.data)
+    hp_corrected_data = np.zeros_like(hp.data)
+
+    for i in range(n_rois):
+        X = np_hp.data[i].reshape(-1, 1)
+        y = hp.data[i]
+        pred = LinearRegression(fit_intercept=False).fit(X, y).predict(X)
+        np_component_data[i] = pred
+        hp_corrected_data[i] = y - pred
+
+    np_component = Traces(np_component_data, raw.ids, raw.fs)
+    hp_corrected = Traces(hp_corrected_data, raw.ids, raw.fs)
+
+    # Add baseline back to produce corrected raw traces
+    raw_corrected_data = hp_corrected_data + baseline.data
+    raw_corrected = Traces(raw_corrected_data, raw.ids, raw.fs)
+
+    return {
+        "raw": raw,
+        "neuropil_raw": np_raw,
+        "hp": hp,
+        "neuropil_hp": np_hp,
+        "baseline": baseline,
+        "neuropil_baseline": np_baseline,
+        "neuropil_component": np_component,
+        "raw_corrected": raw_corrected,
+        "hp_corrected": hp_corrected,
+    }
 
 
 def embed_events(

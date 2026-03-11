@@ -112,19 +112,27 @@ def estimate_shifts(
     Vhat_flat = Vhat.reshape(rank, -1)  # (rank, H*W)
     shifts_out = np.empty((T, 2), dtype=int)
 
+    Vhat_R = Vhat_flat * R.reshape(1, -1) # (rank, H*W)
+    space_basis = ifft2(Vhat_R.reshape(rank, H, Wpix)).reshape(rank, -1)
     for start in range(0, T, batch_size):
+        import time
+        info(f"Batch: {start} / {T}, {time.time()}")
+        t0 = time.time()
         end = min(start + batch_size, T)
         W_batch = codes[start:end]  # (B, rank)
         # (B, H, W)
-        frames_spec = W_batch.dot(Vhat_flat).reshape(end - start, H, Wpix)
-        cross_spec = frames_spec * R[None, :, :]
-        cc_shifted = fftshift(np.abs(ifft2(cross_spec)), axes=(-2, -1))
+        info(f"Step 0: {time.time() - t0}")
+        info(f"{W_batch.shape} {Vhat_flat.shape} {R.shape}")
+        cc = W_batch.dot(space_basis.reshape(end-start, H * Wpix)).reshape(end - start, H, Wpix)
+        info(f"Step 1: {time.time() - t0}")
+        info(f"Step 2: {time.time() - t0}")
+        cc_shifted = fftshift(np.abs(cc), axes=(-2, -1))
+        info(f"Step 3: {time.time() - t0}")
         flat = cc_shifted.reshape(end - start, -1)
         idx = np.argmax(flat, axis=1)
         peak_rows, peak_cols = np.unravel_index(idx, (H, Wpix))
         shifts_out[start:end, 0] = peak_rows - center[0]
         shifts_out[start:end, 1] = peak_cols - center[1]
-        
 
     if max_shift is not None:
         # Zero out shifts whose magnitude exceeds max_shift (unreliable / too large)

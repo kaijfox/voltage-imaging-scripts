@@ -165,6 +165,134 @@ def extract_traces_cmd(
 
 
 @click.command()
+@click.option(
+    "-i", "--input", "video",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to SVD HDF5 video file (e.g. data/session/svd-rank1000.h5).",
+)
+@click.option(
+    "-o", "--output", "output",
+    required=True,
+    type=click.Path(),
+    help=(
+        "Base .mat path; traces saved to {stem}_traces.mat and spikes to {stem}_spikes.mat "
+    ),
+)
+@click.option(
+    "--rois_output",
+    required=True,
+    type=click.Path(),
+    help="Path to save ROICollection .mat",
+)
+@click.option(
+    "--fs",
+    required=True,
+    type=float,
+    help="Sampling rate in Hz (float)",
+)
+@click.option("--grid_n", type=int, default=8, help="Grid size (default 8)")
+@click.option("--percentile", type=float, default=90.0, help="Percentile (default 90.0)")
+@click.option(
+    "--closing_diameter",
+    type=int,
+    default=5,
+    help="Closing diameter in pixels (default 5)",
+)
+@click.option(
+    "--min_footprint",
+    type=int,
+    default=50,
+    help="Min ROI size in pixels to maintain (default 50)",
+)
+@click.option(
+    "--hpf_ms",
+    type=float,
+    default=400.0,
+    help="Savitzky-Golay high-pass filter cutoff in ms (default 400.0)",
+)
+@click.option(
+    "--dff_mode",
+    type=str,
+    default="savgol_add",
+    help="DF/F mode (default 'savgol_add')",
+)
+@click.option(
+    "--spike_hpf_ms",
+    type=float,
+    default=150.0,
+    help="Event detection Savitzky-Golay window in ms (default 150.0)",
+)
+@click.option(
+    "--sd_threshold",
+    type=float,
+    default=4.0,
+    help="SD threshold for spike detection (default 4.0)",
+)
+def spatial_survey(
+    video,
+    output,
+    rois_output,
+    fs,
+    grid_n,
+    percentile,
+    closing_diameter,
+    min_footprint,
+    hpf_ms,
+    dff_mode,
+    spike_hpf_ms,
+    sd_threshold,
+):
+    """Run spatial_traces on a video and save traces, spikes, and ROIs.
+
+    Saves traces['std'] to {stem}_traces.mat, events to {stem}_spikes.mat, and
+    ROICollection to the provided rois_output path.
+    """
+    from ..timeseries.spatial import spatial_traces
+    from ..io.svd_video import SVDVideo
+    from ..timeseries.rois import ROICollection
+
+    logger, (error, warning, info, debug) = configure_logging("spatial")
+
+    info(f"Loading video from {video}")
+    raw_video = SVDVideo.load(str(video))
+
+    info("Computing spatial traces")
+    try:
+        roi_collection, events, traces = spatial_traces(
+            raw_video,
+            grid_n=grid_n,
+            percentile=percentile,
+            closing_diameter=closing_diameter,
+            min_footprint=min_footprint,
+            fs=fs,
+            hpf_ms=hpf_ms,
+            dff_mode=dff_mode,
+            spike_hpf_ms=spike_hpf_ms,
+            sd_threshold=sd_threshold,
+        )
+    except Exception as exc:
+        error(f"spatial_traces failed: {exc}")
+        raise
+
+    base = Path(output)
+    stem = base.stem
+    traces_path = base.with_name(stem + "_traces.mat")
+    spikes_path = base.with_name(stem + "_spikes.mat")
+
+    info(f"Saving traces to {traces_path}")
+    traces["std"].save_mat(traces_path)
+
+    info(f"Saving spikes to {spikes_path}")
+    events.save_mat(spikes_path)
+
+    info(f"Saving ROI collection to {rois_output}")
+    roi_collection.save(rois_output)
+
+    info("spatial-survey done")
+
+
+@click.command()
 @input_output_options
 @click.option(
     "--mode",
