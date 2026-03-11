@@ -291,6 +291,7 @@ def sub_lowpass_cmd(input_path, output_path, window_length, polyorder):
 )
 @click.option("--max-shift", type=int, default=None, help="Maximum shift (px).")
 @click.option("--n-passes", type=int, default=2, help="Number of passes.")
+@click.option("--batch_lim", type=int, default=4000*4000, help="Pixels per batch.")
 @click.option(
     "--hpf-px", type=float, default=10.0, help="High-pass filter width in px."
 )
@@ -310,6 +311,7 @@ def motion_correct_cmd(
     sharp_px,
     sharp_amount,
     max_rank,
+    batch_lim
 ):
     """Apply motion correction to SVD video using SVD-based algorithm."""
     from ..io.svd_video import SVDVideo
@@ -325,7 +327,7 @@ def motion_correct_cmd(
     mask = None
     if rois:
         artifact_rois = ROICollection.load(rois)
-        artifact_roi = artifact_rois[0]
+        artifact_roi = artifact_rois.rois[0]
         mask = footprint_mask(artifact_rois.image_shape, artifact_roi.footprint)
 
     corrected, shifts = motion_correct_svd(
@@ -337,6 +339,7 @@ def motion_correct_cmd(
         sharp_px=sharp_px,
         sharp_amount=sharp_amount,
         max_rank=max_rank,
+        batch_limit=batch_lim
     )
 
     info(f"Saving video to {output_path}")
