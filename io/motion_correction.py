@@ -112,13 +112,17 @@ def estimate_shifts(
     Vhat_flat = Vhat.reshape(rank, -1)  # (rank, H*W)
     shifts_out = np.empty((T, 2), dtype=int)
 
+    Vhat_R = Vhat_flat * R.reshape(1, -1) # (rank, H*W)
+    space_basis = ifft2(Vhat_R.reshape(rank, H, Wpix)).reshape(rank, -1)
     for start in range(0, T, batch_size):
+        import time
+        info(f"Batch: {start} / {T}, {time.time()}")
+        t0 = time.time()
         end = min(start + batch_size, T)
         W_batch = codes[start:end]  # (B, rank)
         # (B, H, W)
-        frames_spec = W_batch.dot(Vhat_flat).reshape(end - start, H, Wpix)
-        cross_spec = frames_spec * R[None, :, :]
-        cc_shifted = fftshift(np.abs(ifft2(cross_spec)), axes=(-2, -1))
+        cc = W_batch.dot(space_basis).reshape(end - start, H, Wpix)
+        cc_shifted = fftshift(np.abs(cc), axes=(-2, -1))
         flat = cc_shifted.reshape(end - start, -1)
         idx = np.argmax(flat, axis=1)
         peak_rows, peak_cols = np.unravel_index(idx, (H, Wpix))
@@ -343,6 +347,7 @@ def motion_correct_svd(
     sharp_px: float = 1.,
     sharp_amount: float = 100.,
     max_rank: int | None = None,
+    batch_limit: int = 4000 * 4000,
 ) -> Tuple[SVDVideo, np.ndarray]:
     """
     Full two-pass SVD motion correction pipeline.
@@ -371,7 +376,7 @@ def motion_correct_svd(
     if max_rank is not None:
         info(f"Truncating to rank {max_rank}.")
         vid = SVDVideo(
-            vid.U[:, :max_rank],
+            vid.U[:2400, :max_rank],
             vid.S[:max_rank],
             vid.Vt[:max_rank],
             orthonormal=vid.orthonormal,
@@ -380,10 +385,10 @@ def motion_correct_svd(
     # Optionally inpaint occluding mask first
     if mask is not None:
         info(f"Inpainting {mask.sum()} pixels.")
-        Vt_inp = inpaint_basis(np.asarray(video.Vt), mask)
+        Vt_inp = inpaint_basis(np.asarray(vid.Vt), mask)
         vid = SVDVideo(
-            np.asarray(video.U).copy(),
-            np.asarray(video.S).copy(),
+            np.asarray(vid.U).copy(),
+            np.asarray(vid.S).copy(),
             Vt_inp,
             orthonormal=False,
         )
@@ -400,7 +405,7 @@ def motion_correct_svd(
     code_ref = np.mean(frame_codes, axis=0)
     R = compute_reference_spectrum(Vhat, code_ref)
     info("Estimating shifts.")
-    shifts = estimate_shifts(frame_codes, Vhat, R, max_shift)
+    shifts = estimate_shifts(frame_codes, Vhat, R, max_shift, batch_limit=batch_limit)
     all_shifts = [shifts]
 
     mean_shift = shifts.mean(axis=0)
@@ -411,11 +416,11 @@ def motion_correct_svd(
     for i in range(n_passes - 1):
         info(f"Multi-pass iteration {i + 2}:")
         all_shifts.append(shifts)
-        mean_img = compute_shifted_mean_image(vid, shifts[-1])
+        mean_img = compute_shifted_mean_image(vid, shifts)
         mean_proc = preprocess_basis_for_alignment(mean_img[None, :, :])[0]
         R = np.conj(fft2(mean_proc))
         info("Estimating shifts.")
-        shifts = estimate_shifts(frame_codes, Vhat, R, max_shift)
+        shifts = estimate_shifts(frame_codes, Vhat, R, max_shift, batch_limit=batch_limit)
 
         mean_shift = shifts.mean(axis=0)
         info(f"Avg.: row={mean_shift[0]:.2f}, col={mean_shift[1]:.2f}")
