@@ -372,19 +372,19 @@ def motion_correct_svd(
     SVDVideo
         Orthogonalized motion-corrected video.
     """
-    vid = video
 
     # Optionally truncate rank
     if max_rank is not None:
         info(f"Truncating to rank {max_rank}.")
-        vid = SVDVideo(
-            vid.U[:2400, :max_rank],
-            vid.S[:max_rank],
-            vid.Vt[:max_rank],
-            orthonormal=vid.orthonormal,
+        video = SVDVideo(
+            video.U[:, :max_rank],
+            video.S[:max_rank],
+            video.Vt[:max_rank],
+            orthonormal=video.orthonormal,
         )
 
     # Optionally inpaint occluding mask first
+    vid = video
     if mask is not None:
         info(f"Inpainting {mask.sum()} pixels.")
         Vt_inp = inpaint_basis(np.asarray(vid.Vt), mask)
@@ -430,7 +430,7 @@ def motion_correct_svd(
     # Negate: estimate_shifts returns the displacement of each frame;
     # apply_shifts_lowrank rolls bases forward, so we roll by -shifts to
     # correct.
-    corrected = apply_shifts_lowrank(vid, -shifts)
+    corrected = apply_shifts_lowrank(video, -shifts)
 
     if n_passes == 1:
         return corrected, all_shifts[0]
