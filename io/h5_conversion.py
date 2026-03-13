@@ -9,6 +9,7 @@ import numpy as np
 import argparse
 import sys
 from contextlib import nullcontext
+from typing import Sequence
 
 logger, (error, warning, info, debug) = configure_logging("converter")
 
@@ -19,6 +20,7 @@ def stream_framereader(
     batch_size: int,
     progress=True,
     start: int = 0,
+    chunk: Sequence[int] = None,
 ):
     # Normalize paths
     input_path = str(Path(input_path))
@@ -34,8 +36,9 @@ def stream_framereader(
             height=reader.h,
             dtype=np.dtype(reader.dtype),
             reference_frame_start=start,
+            chunk=chunk,
         )
-        
+
         # Set up optional progress indicator
         if progress:
             iterator = tqdm.trange(start, reader.max_frames, batch_size)
@@ -55,12 +58,15 @@ def stream_framereader(
             f["video"][vid_start:vid_end] = frames
 
 
-def create_h5_video(path, frames, width, height, reference_frame_start, dtype):
+def create_h5_video(
+    path, frames, width, height, reference_frame_start, dtype, chunk=None
+):
     """Create blank H5 video file."""
     # Apply to an open hdf5 file
+    chunks = tuple(chunk) if chunk is not None else None
     if isinstance(path, h5py.File):
         f = path
-        f.create_dataset("video", (frames, height, width), dtype=dtype)
+        f.create_dataset("video", (frames, height, width), dtype=dtype, chunks=chunks)
         f.attrs["frames"] = frames
         f.attrs["width"] = width
         f.attrs["height"] = height
