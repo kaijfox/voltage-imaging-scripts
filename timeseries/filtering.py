@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import signal
 from scipy.optimize import curve_fit
-from typing import Tuple
+from typing import Tuple, Sequence
 
 from .types import Traces
 from ..cli.common import configure_logging
@@ -38,12 +38,11 @@ def filter_dff(
         raise ValueError(f"Unknown df/f filtering mode: {mode}")
 
     data = traces.data
-    
 
     if mode == "2exp":
         dff = np.zeros_like(data)
         baseline = np.zeros_like(data)
-        
+
         T = data.shape[1]
         time = np.arange(T)
         for i in range(data.shape[0]):
@@ -58,17 +57,24 @@ def filter_dff(
             data_min, data_max = data[i].min(), data[i].max()
             data_range = data_max - data_min
             log_data = np.log(data[i] - data_min + 1e-3 * data_range)
-            decay_start = min(np.median(np.diff(log_data[:T//4])), 0)
-            decay_end = min(np.median(np.diff(log_data[T//4:])), 0)
+            decay_start = min(np.median(np.diff(log_data[: T // 4])), 0)
+            decay_end = min(np.median(np.diff(log_data[T // 4 :])), 0)
             p0 = (data_range, decay_start, data_range, decay_end, data_min)
             bounds = (
                 (0, -np.inf, 0, -np.inf, -np.inf),
                 (np.inf, 0, np.inf, 0, np.inf),
             )
-            
+
             # Curve fit and remove baseline
             try:
-                popt, _ = curve_fit(double_exponential_curve, time, data[i], p0=p0, bounds=bounds, maxfev=10000)
+                popt, _ = curve_fit(
+                    double_exponential_curve,
+                    time,
+                    data[i],
+                    p0=p0,
+                    bounds=bounds,
+                    maxfev=10000,
+                )
             except RuntimeError:
                 warning(f"Curve fit failed for trace {i}, not filtering")
                 dff[i] = data[i]
@@ -88,3 +94,59 @@ def filter_dff(
         Traces(dff, traces.ids, traces.fs),
         Traces(baseline, traces.ids, traces.fs),
     )
+
+
+def frequency_filter(
+    data: np.ndarray,
+    fs: float,
+    freqs: Sequence[str],
+    order: int = 4,
+    axis: int = -1,
+) -> np.ndarray:
+    """Apply frequency-domain filtering described by `freqs`.
+
+    Parameters
+    ----------
+    data: array-like
+        Input array. Filtering is applied along `axis`.
+    fs: float
+        Sampling frequency in Hz.
+    freqs: sequence of str
+        Frequency specifications. Examples:
+        - '<50'  -> high-pass at 50 Hz (remove <50)
+        - '100-200' -> band-cut 100-200 Hz implemented as data - bandpass(data)
+        - '>2000' -> low-pass at 2000 Hz (remove >2000)
+    order: int
+        Butterworth filter order (shared across all filters).
+    axis: int
+        Axis along which to filter.
+
+    Returns
+    -------
+    filtered: np.ndarray
+        Filtered array of same shape as input.
+    """
+    x = np.asarray(data, dtype=float)
+    nyq = 0.5 * fs
+
+    for spec in freqs:
+        s = str(spec).strip()
+        if s.startswith("<"):
+            cutoff = float(s[1:])
+            b, a = signal.butter(order, cutoff / nyq, btype="high")
+            x = signal.filtfilt(b, a, x, axis=axis)
+        elif s.startswith(">"):
+            cutoff = float(s[1:])
+            b, a = signal.butter(order, cutoff / nyq, btype="low")
+            x = signal.filtfilt(b, a, x, axis=axis)
+        elif "-" in s:
+            lo, hi = s.split("-", 1)
+            low = float(lo)
+            high = float(hi)
+            b, a = signal.butter(order, [low / nyq, high / nyq], btype="band")
+            band = signal.filtfilt(b, a, x, axis=axis)
+            x = x - band
+        else:
+            raise ValueError(f"Unrecognized frequency spec: {spec}")
+
+    return x

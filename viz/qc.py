@@ -5,7 +5,21 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import mplutil.util as vu
+import mplutil.nb as nb_util
 from matplotlib import ticker
+
+
+def setup_plotter():
+    _, plotter = nb_util.init_plt(
+        ".",
+        style="compact",
+        save=True,
+        display=False,
+        fmt=["pdf", "png"],
+        despine=False,
+    )
+    return plotter
+
 
 
 def plot_distribution(ax, t, data, label=None, color=".7", mean_color="k"):

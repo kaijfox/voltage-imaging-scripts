@@ -7,11 +7,10 @@ Provides:
 - load_config(): load PipelineConfig from a TOML file
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
+from ..timeseries.rois import ROICollection
 
 try:
     import tomllib  # Python 3.11+
@@ -22,6 +21,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PipelineConfig:
@@ -73,12 +73,45 @@ class SessionConfig:
         Sampling rate in Hz for this session.
     rank: int
         SVD rank used for video compression and trace extraction.
+    band_cuts: list[str]
+        List of frequency band cut specifications, e.g. ['80-125', '>2000']. See
+        `timeseries.filtering.frequency_filter` for details.
     """
 
     name: str
     roi_filename: str
     fs: float
     rank: int
+    band_cuts: list[str]
+
+
+def load_session_config(path: str | Path) -> SessionConfig:
+    """Load a SessionConfig from a TOML file.
+
+    The TOML file should have a [session] table whose keys match
+    SessionConfig fields. Missing keys will raise an error.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the TOML config file.
+
+    Returns
+    -------
+    SessionConfig
+    """
+    path = Path(path)
+    with open(path, "rb") as fh:
+        session_data = tomllib.load(fh)
+
+    keys = set(SessionConfig.__dataclass_fields__.keys())
+    missing = keys - set(session_data.keys())
+    if missing:
+        raise ValueError(
+            f"Missing required session config keys in {path}: {missing}",
+        )
+
+    return SessionConfig(**{k: session_data[k] for k in keys})
 
 
 def load_config(path: str | Path) -> PipelineConfig:
@@ -121,6 +154,7 @@ def load_config(path: str | Path) -> PipelineConfig:
 # Session paths
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SessionPaths:
     """Resolved file paths for a single imaging session.
@@ -139,6 +173,11 @@ class SessionPaths:
     traces_dff_baseline: Path
     traces_neuropil: Path
     events: Path
+    mc_video: Path
+    mc_shifts: Path
+    spatial_traces: Path
+    spatial_spikes: Path
+    spatial_rois: Path
 
 
 def session_paths(
@@ -173,6 +212,13 @@ def session_paths(
     traces_neuropil = session_dir / "traces_neuropil.mat"
     events = session_dir / "spikes.mat"
 
+    mc_video = session_dir / f"svd-mc-rank{session.rank}.h5"
+    mc_shifts = session_dir / "mc_shifts.csv"
+
+    spatial_traces = session_dir / "spatial-survey_traces.mat"
+    spatial_spikes = session_dir / "spatial-survey_spikes.mat"
+    spatial_rois = session_dir / "rois_spatial-survey.mat"
+
     return SessionPaths(
         session_dir=session_dir,
         roi_file=roi_file,
@@ -185,4 +231,19 @@ def session_paths(
         traces_dff_baseline=traces_dff_baseline,
         traces_neuropil=traces_neuropil,
         events=events,
+        mc_video=mc_video,
+        mc_shifts=mc_shifts,
+        spatial_traces=spatial_traces,
+        spatial_spikes=spatial_spikes,
+        spatial_rois=spatial_rois,
     )
+
+
+# ---------------------------------------------------------------------------
+# Object naming conventions
+# ---------------------------------------------------------------------------
+
+
+def soma_ids(roi_collection: ROICollection) -> ROICollection:
+    """Extract soma ROIs from a collection."""
+    return [roi_id for roi_id in roi_collection.ids if "soma" in roi_id.lower()]

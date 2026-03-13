@@ -1,5 +1,6 @@
 from .FrameReader import FrameReader
 from .svd import SRSVD
+from .guided_svd import guided_svd, GuidedSVDResult
 from ..cli.common import configure_logging
 
 from pathlib import Path
@@ -116,6 +117,42 @@ def _stream_conversion(
                     svd.receive_batch(frames, batch_idx)
 
     return svd
+
+
+def stream_guided_svd(
+    input_path: os.PathLike,
+    footprints: list,
+    output_path: os.PathLike,
+    max_rank: int = 64,
+    start_frame: int = 0,
+    end_frame: int = None,
+    n_clusters: int = 10,
+    spatial_sizes=(21, 11, 5),
+    hops=(10, 5, 2),
+    window_sizes=(2000, 200),
+    batch_r: int = 20,
+    batch_c: int = 20,
+) -> GuidedSVDResult:
+    """
+    footprints: list of (P_i, 2) arrays.
+    Runs guided SVD on frames[start_frame:end_frame], saves to output_path, returns result.
+    """
+    with h5py.File(input_path, "r") as f:
+        result = guided_svd(
+            f["video"],
+            footprints,
+            spatial_sizes=spatial_sizes,
+            hops=hops,
+            window_sizes=window_sizes,
+            n_clusters=n_clusters,
+            max_rank=max_rank,
+            batch_r=batch_r,
+            batch_c=batch_c,
+            start_frame=start_frame,
+            end_frame=end_frame,
+        )
+    result.save(output_path)
+    return result
 
 
 def stream_framereader(

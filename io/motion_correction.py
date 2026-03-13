@@ -4,9 +4,12 @@ import numpy as np
 from numpy.fft import fft2, ifft2, fftshift
 from scipy.ndimage import gaussian_filter
 from typing import Tuple
+from scipy.spatial import ConvexHull
+from skimage.draw import polygon
 
 from .svd_video import SVDVideo
 from ..cli.common import configure_logging
+from ..timeseries.rois import ROICollection, ROI
 
 logger, (error, warning, info, debug) = configure_logging("motion")
 
@@ -433,3 +436,41 @@ def motion_correct_svd(
         return corrected, all_shifts[0]
     else:
         return corrected, all_shifts
+    
+
+
+def build_artifact_mask(rois: ROICollection) -> Tuple[ROICollection, ...]:
+    """
+    Commpute filled convex hull of each ROI and combine to single footprint
+    """
+
+    if rois.ids is not None and "artifact" in rois.ids[0]:
+        print("Collection already has artifact ROI, skipping mask build.")
+        artifact_only = rois["artifact"]
+        return rois, artifact_only
+
+    mask = np.zeros(rois.image_shape, dtype=bool)
+    for roi in rois.rois:
+        if len(roi.footprint) < 3:
+            continue
+        vertices = ConvexHull(roi.footprint).vertices
+        mask[
+            *polygon(
+                roi.footprint[vertices, 0],
+                roi.footprint[vertices, 1],
+                rois.image_shape,
+            )
+        ] = True
+    footprint = np.column_stack(np.nonzero(mask))
+    roi = ROI(footprint, weights=np.ones(len(footprint)), code=np.ones(1))
+    ids = rois.ids
+    if ids is None:
+        ids = [f"ROI {i}" for i in range(len(rois.rois))]
+    rois = ROICollection(
+        [*rois.rois, roi],
+        rois.image_shape,
+        ids + ["artifact"],
+    )
+
+    return rois, rois["artifact"]
+

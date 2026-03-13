@@ -2,7 +2,7 @@ import numpy as np
 import awkward as ak
 import pandas as pd
 from typing import Tuple, Optional, Sequence, Any, Union
-
+from scipy import ndimage
 
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
@@ -229,6 +229,39 @@ def qc_trace_extraction_3(
         "raw_corrected": raw_corrected,
         "hp_corrected": hp_corrected,
     }
+
+
+def qc_trace_extraction_4(
+    video: SVDVideo,
+    soma_rois: ROICollection,
+    fs: float,
+    hpf_ms: float,
+    neuropil_lpf_px: float = 50,
+):
+    # cutoff_freq = √ln(2) / 2πσ
+    sigma = 2 * np.sqrt(np.log(2)) * neuropil_lpf_px / (2 * np.pi)
+    lpf_spatial = ndimage.gaussian_filter(video.Vt, sigma, axes=(-2, -1))
+    video_lpf = SVDVideo(video.U, video.S, lpf_spatial)
+    video_hpf = SVDVideo(video.U, video.S, video.Vt - lpf_spatial)
+
+    extract_kw = dict(neuropil_range=(-1, -1), ols=False, weighted=False, fs=fs)
+    raw, _ = extract_traces(video_hpf, soma_rois, **extract_kw)
+    np_raw, _ = extract_traces(video_lpf, soma_rois, **extract_kw)
+
+    hp, baseline = filter_dff(
+        raw,
+        mode="savgol_add",
+        window_length=ms_to_samples(hpf_ms, fs),
+        polyorder=2,
+    )
+
+    return {
+        "raw": raw,
+        "neuropil_raw": np_raw,
+        "hp": hp,
+        "baseline": baseline,
+    }
+
 
 
 def embed_events(

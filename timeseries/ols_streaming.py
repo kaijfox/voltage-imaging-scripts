@@ -86,7 +86,7 @@ def extract_traces(
     from ..io.svd import SRSVD
 
     # Resolve ROIs to W array and get image shape
-    W, image_shape = _resolve_rois(rois)
+    W, image_shape = _resolve_rois(rois, weighted=weighted)
     K = W.shape[2]
 
     # Generate ids if not provided
@@ -171,7 +171,7 @@ def extract_traces(
     )
 
 
-def _resolve_rois(rois):
+def _resolve_rois(rois, weighted=True):
     """
     Convert ROI input to (H, W, K) weight array.
 
@@ -195,13 +195,13 @@ def _resolve_rois(rois):
             raise ValueError(
                 "ROICollection must have image_shape set to build weight array"
             )
-        W = _roi_collection_to_weights(rois)
+        W = _roi_collection_to_weights(rois, weighted=weighted)
         return W, rois.image_shape
 
     raise TypeError(f"rois must be ndarray, ROICollection, or path, got {type(rois)}")
 
 
-def _roi_collection_to_weights(roi_collection):
+def _roi_collection_to_weights(roi_collection, weighted=True):
     """Convert ROICollection to (H, W, K) weight array."""
     H, W_dim = roi_collection.image_shape
     K = len(roi_collection.rois)
@@ -211,7 +211,7 @@ def _roi_collection_to_weights(roi_collection):
         if len(roi.footprint) > 0:
             rows = roi.footprint[:, 0]
             cols = roi.footprint[:, 1]
-            W[rows, cols, k] = roi.weights
+            W[rows, cols, k] = roi.weights if weighted else 1.0
 
     return W
 

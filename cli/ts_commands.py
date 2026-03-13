@@ -251,12 +251,27 @@ def spatial_survey(
     from ..timeseries.spatial import spatial_traces
     from ..io.svd_video import SVDVideo
     from ..timeseries.rois import ROICollection
+    import tomllib
 
     logger, (error, warning, info, debug) = configure_logging("spatial")
 
     info(f"Loading video from {video}")
     raw_video = SVDVideo.load(str(video))
 
+    # If there is a session.toml file with `fs` specified, override
+    session_toml = Path(video).parent / "session.toml"
+    if session_toml.exists():
+        with open(session_toml, "rb") as f:
+            try:
+                config = tomllib.load(f)
+            except Exception as exc:
+                warning(f"Failed to parse session.toml, fs may not be set correctly!")
+                warning(f"Error was: {exc}")
+                config = {}
+        if "fs" in config:
+            fs = config["fs"]
+            info(f"Overriding fs with value from session.toml: {fs} Hz")
+    
     info("Computing spatial traces")
     try:
         roi_collection, events, traces = spatial_traces(
