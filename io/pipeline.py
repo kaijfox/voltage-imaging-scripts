@@ -213,7 +213,7 @@ def session_paths(
     events = session_dir / "spikes.mat"
 
     mc_video = session_dir / f"svd-mc-rank{session.rank}.h5"
-    mc_shifts = session_dir / "mc_shifts.csv"
+    mc_shifts = session_dir / "mc-shifts.csv"
 
     spatial_traces = session_dir / "spatial-survey_traces.mat"
     spatial_spikes = session_dir / "spatial-survey_spikes.mat"
