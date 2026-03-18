@@ -17,8 +17,9 @@ from ..viz.filterbands import (
 from ..viz.qc import setup_plotter
 from ..viz.rois import display_rois
 from ..viz.motion_correction import compare_videos, plot_shifts
-import numpy as np
 from .common import input_output_options
+import numpy as np
+from pathlib import Path
 
 
 @click.command()
@@ -41,11 +42,18 @@ from .common import input_output_options
 def inspect_filters_cmd(
     input_path: str,
     output_path: str,
+    pipeline_cfg: str,
     despike_window_ms: float,
     despike_savgol_ms: float,
 ):
+    # Path to directory containing session.toml
+    input_path = Path(input_path)
+    # Path to directory where plots should be saved; optionally containing {session.name}
+    output_path = Path(output_path)
+    
     session = load_session_config(input_path / "session.toml")
-    paths = session_paths(input_path, session)
+    # Constructs paths as <data_dir>/<session_name>/<data-file-name>
+    paths = session_paths(input_path.parent, session)
 
     raw_video = SVDVideo.load(paths.raw_video)
     spatial_rois = ROICollection.load(paths.spatial_rois)
@@ -69,7 +77,7 @@ def inspect_filters_cmd(
     coh_filt, _ = robust_coherence(filtered.data, fs, 2 * fs)
 
     plotter = setup_plotter()
-    plotter.plot_dir = str(output_path.format(session=session))
+    plotter.plot_dir = str(output_path).format(session=session)
     fig, ax = display_rois(spatial_rois, raw_video, target_gamma=0.2)
     plotter.finalize(fig, name="rois")
     fig, ax = plot_filtered_spectra(despiked, filtered, fs)
@@ -88,20 +96,39 @@ def inspect_filters_cmd(
     default=10.0,
     help='Target playback framerate for video comparison',
 )
+@click.option("--filename", nargs=2, multiple=True, type=(str, str))
 def inspect_mc_cmd(
     input_path: str,
     output_path: str,
     target_fs: float,
+    filename
 ):
-    session = load_session_config(input_path / "session.toml")
-    paths = session_paths(input_path, session)
+    # Path to directory containing session.toml
+    input_path = Path(input_path)
+    # Path to directory where plots should be saved; optionally containing {session.name}
+    output_path = Path(output_path)
 
-    raw_video = SVDVideo.load(paths.raw_video)
-    mc_video = SVDVideo.load(paths.mc_video)
-    shifts = np.loadtxt(paths.mc_shifts, delimiter=",", skiprows=1)
+    # Constructs paths as <data_dir>/<session_name>/<data-file-name>
+    session = load_session_config(input_path / "session.toml")
+    paths = session_paths(input_path.parent, session)
+
+    print(paths.session_dir)
+    print(paths.raw_video)
+    print(paths.mc_video)
+    print(paths.mc_shifts)
+    overrides = {k: v for k, v in filename}
+    raw_filename = overrides.get("raw_video", paths.raw_video)
+    mc_filename = overrides.get("mc_video", paths.mc_video)
+    shifts_filename = overrides.get("mc_shifts", paths.mc_shifts)
+    print(raw_filename)
+    print(mc_filename)
+    print(shifts_filename)
+    raw_video = SVDVideo.load(raw_filename)
+    mc_video = SVDVideo.load(mc_filename)
+    shifts = np.loadtxt(shifts_filename, delimiter=",", skiprows=1)
 
     plotter = setup_plotter()
-    plotter.plot_dir = str(output_path.format(session=session))
+    plotter.plot_dir = str(output_path).format(session=session)
     fig, ax = plot_shifts(shifts, fs=session.fs)
     plotter.finalize(fig, name="mc-shifts")
 
