@@ -1,5 +1,6 @@
 from ..timeseries.rois import ROICollection
 from ..timeseries.types import Traces, Events
+from .traces import _resolve_selection, _compute_positions, _infer_names_and_colors
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -36,45 +37,6 @@ def _ensure_axis(
     else:
         fig = fig or ax.figure
     return fig, ax
-
-
-def _infer_names_and_colors(
-    roi_collection: ROICollection, select_idx: Sequence[int] | None = None
-):
-    """Infer display names and per-ROI colors.
-
-    Returns (names, colors) where names is list[str] and colors is list of matplotlib color specs.
-    """
-    import matplotlib as mpl
-
-    n = len(roi_collection.rois)
-    if select_idx is not None:
-        n = len(select_idx)
-
-    # names
-    if getattr(roi_collection, "ids", None) is not None:
-        names_all = list(roi_collection.ids)
-    else:
-        names_all = [f"ROI {i}" for i in range(len(roi_collection.rois))]
-
-    if select_idx is None:
-        names = names_all
-    else:
-        names = [names_all[i] for i in select_idx]
-
-    # colors
-    if getattr(roi_collection, "colors", None) is not None:
-        colors_all = list(roi_collection.colors)
-    else:
-        cmap = plt.get_cmap("tab10")
-        colors_all = [cmap(i % cmap.N) for i in range(len(roi_collection.rois))]
-
-    if select_idx is None:
-        colors = colors_all
-    else:
-        colors = [colors_all[i] for i in select_idx]
-
-    return names, colors
 
 
 def get_pixel_edges(r: int, c: int) -> tuple:
@@ -627,39 +589,23 @@ def display_traces(
         data = data.astype(float, copy=True)
     n_cells, n_frames = data.shape
 
-    # Convert select to indices
-    if select is None:
-        sel_idx = list(range(n_cells))
+    # Build full id list corresponding to rows in `data`
+    if roi_collection is not None and getattr(roi_collection, "ids", None) is not None:
+        full_ids = list(roi_collection.ids)
+    elif getattr(traces, "ids", None) is not None:
+        full_ids = list(traces.ids)
     else:
-        if len(select) > 0 and isinstance(select[0], str):
-            if roi_collection is not None and getattr(roi_collection, "ids", None) is not None:
-                ids = list(roi_collection.ids)
-                sel_idx = [ids.index(s) for s in select]
-            elif getattr(traces, "ids", None) is not None:
-                ids = list(traces.ids)
-                sel_idx = [ids.index(s) for s in select]
-            else:
-                sel_idx = list(select)
-        else:
-            sel_idx = list(select)
+        full_ids = [str(i) for i in range(n_cells)]
 
-    # Optional scaling: scale each selected row by its max absolute value so that
-    # its amplitude fits within +/- (scale_to / 2).
-    scale_factors_used = None
-    if scale_to is not None:
-        if not (isinstance(scale_to, (int, float)) and scale_to > 0):
-            raise ValueError("'scale_to' must be a positive number")
-        half_range = float(scale_to) / 2.0
-        scale_factors_used = []
-        for i in sel_idx:
-            row = data[i]
-            max_abs = np.nanmax(np.abs(row))
-            if max_abs > 0:
-                factor = half_range / max_abs
-                data[i] = row * factor
-            else:
-                factor = 1.0
-            scale_factors_used.append(factor)
+    # Resolve selection of rows
+    sel_idx, sel_roi_ids = _resolve_selection(traces, select, roi_collection)
+
+    # Compute positions and optionally scale data in-place; positions_map maps roi_id -> offset
+    # Note: pass None for scale_to to preserve matplotlib path behavior
+    positions_map, scale_factors_used = _compute_positions(
+        full_ids, [full_ids[i] for i in sel_idx], data=data, scale_to=None, provided=positions
+    )
+    positions_used = [positions_map[full_ids[i]] for i in sel_idx]
 
     # Infer / default metadata as needed
     if roi_collection is None:
@@ -700,17 +646,8 @@ def display_traces(
         xlabel = "frame"
 
     # Calculate a good vertical offset between the traces unless positions provided
-    if positions is None:
-        spans = [2 * np.nanmax(np.abs(data[i])) for i in sel_idx]
-        span = max(spans) if len(spans) > 0 else 1.0
-        offset = span * 1.2
-        positions_used = [k * offset for k in range(len(sel_idx))]
-    else:
-        if len(positions) != len(sel_idx):
-            raise ValueError(
-                "length of 'positions' must match number of selected traces"
-            )
-        positions_used = list(positions)
+    # (Position computation delegated to _compute_positions above.)
+    # positions_used already assigned from positions_map returned by _compute_positions.
 
     # Plot traces
     fig, ax = _ensure_axis(fig, axis)
@@ -777,19 +714,7 @@ def display_events(
 ) -> Dict[str, Any]:
     """Display events aligned to traces or as separate event rows."""
     # Convert select similar to display_traces
-    n = len(events.spike_frames)
-    if select is None:
-        sel_idx = list(range(n))
-    else:
-        if (
-            len(select) > 0
-            and isinstance(select[0], str)
-            and getattr(events, "ids", None) is not None
-        ):
-            ids = list(events.ids)
-            sel_idx = [ids.index(s) for s in select]
-        else:
-            sel_idx = list(select)
+    sel_idx, _ = _resolve_selection(events, select, None)
 
     # x axis conversion
     if traces is not None and traces.fs is not None:

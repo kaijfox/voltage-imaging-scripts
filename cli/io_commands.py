@@ -158,6 +158,12 @@ def convert_guided(
         f"Starting guided SVD conversion: input={input_path}, output={output_path}"
     )
 
+    if len(spatial) != len(hop):
+        raise click.BadParameter(
+            "Length of --spatial and --hop must match (got "
+            f"{len(spatial)} and {len(hop)})"
+        )
+
     # Load inputs
     roc = ROICollection.load(rois)
     footprints = [r.footprint for r in roc.rois]

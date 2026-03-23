@@ -331,7 +331,7 @@ def video_and_trace(
     anim = FuncAnimation(fig, update, frames=n_frames, blit=False)
 
     try:
-        anim.save(str(out_path), dpi=150, fps=max(1.0, float(output_fps)))
+        anim.save(str(out_path), dpi=300, fps=max(1.0, float(output_fps)))
     finally:
         plt.close(fig)
 

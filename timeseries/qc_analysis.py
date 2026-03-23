@@ -263,6 +263,65 @@ def qc_trace_extraction_4(
     }
 
 
+def qc_trace_extraction_5(
+    video: Traces,
+    soma_rois: ROICollection,
+    background_rois: ROICollection,
+    fs: float,
+    hpf_ms: float,
+    detrend_mode: str = "savgol_add",
+):
+    """
+    Trace extraction with patch-based background subtraction and regression on
+    detrended traces.
+
+    Returns
+    -------
+    dict
+        A dictionary containing the extracted traces, each of shape (n_soma,
+        n_frames) except "bg_raw" and "bg_hp" which are (1, n_frames):
+        - "raw", "bg_raw": raw traces for soma and background ROIs
+        - "hp", "bg_hp": detrended filtered traces for soma and background ROIs
+        - "corrected", "corrected_hp": raw/detrended soma traces with background removed
+        - "bg_component", "bg_component_hp": component of original soma traces removed
+    """
+    
+    extract_kws = dict(neuropil_range=(-1, -1), ols=False, weighted=False, fs=fs)
+    soma_raw, _ = extract_traces(video, soma_rois, **extract_kws)
+    bg_raw, _ = extract_traces(video, background_rois, **extract_kws)
+
+    dff_kw = dict(mode=detrend_mode, window_length=ms_to_samples(hpf_ms, fs))
+    soma_hp, soma_baseline = filter_dff(soma_raw, **dff_kw)
+    bg_hp, bg_baseline = filter_dff(bg_raw, **dff_kw)
+
+    bg_component_hp = np.zeros_like(soma_hp.data)
+    bg_component_raw = np.zeros_like(soma_hp.data)
+    soma_corrected_hp = np.zeros_like(soma_hp.data)
+    soma_corrected_raw = np.zeros_like(soma_hp.data)
+
+    for i in range(len(soma_hp.data)):
+        X = bg_hp.data[0].reshape(-1, 1)
+        y = soma_hp.data[i]
+        pred = LinearRegression(fit_intercept=False).fit(X, y).predict(X)
+        soma_corrected_hp[i] = y - pred
+        bg_component_hp[i] = pred
+        soma_corrected_raw[i] = y - pred + soma_baseline.data[i]
+        bg_component_raw[i] = pred + bg_baseline.data[0]
+
+    return {
+        "raw": soma_raw,
+        "bg_raw": bg_raw,
+        "hp": soma_hp,
+        "bg_hp": bg_hp,
+        "corrected": soma_corrected_raw,
+        "corrected_hp": soma_corrected_hp,
+        "bg_component": bg_component_raw,
+        "bg_component_hp": bg_component_hp,
+    }
+
+    
+
+
 
 def embed_events(
     values: ak.Array,

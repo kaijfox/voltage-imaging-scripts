@@ -1558,6 +1558,8 @@ class MainWindow(QMainWindow):
             if n > 0:
                 next_idx = (self.state.current_roi_index + 1) % n
                 self.state.set_current_roi_index(next_idx)
+        elif action == "rename_roi":
+            self.sidebar.main_view_detail.roi_selector._on_rename_clicked()
 
         # Display toggles
         elif action == "toggle_show_all":

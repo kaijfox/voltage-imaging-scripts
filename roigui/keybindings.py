@@ -23,6 +23,7 @@ DEFAULT_BINDINGS = {
     Qt.Key_N: "new_roi",
     Qt.Key_P: "propose_roi",
     Qt.Key_Tab: "next_roi",
+    Qt.Key_M: "rename_roi",
     # Display
     Qt.Key_S: "toggle_show_all",
     Qt.Key_F: "toggle_fill",

@@ -605,6 +605,7 @@ def phase_aligned_video(
     vmin=-3,
     vmax=3,
     cmap="inferno_r",
+    ms_per_s: float = 15.0,
 ):
     """
     Produce two variant videos (unbounded and bounded) showing the mean phase-aligned video and a trace.
@@ -631,14 +632,14 @@ def phase_aligned_video(
     """
     roi_collection = hi_rois[0] if hi_rois is not None else None
     # derive mean roi trace from hi trace windows
-    roi_trace = np.mean(trace_windows["hi"], axis=-2)[0]
+    roi_trace = ak.mean(trace_windows["hi"], axis=-2)[0]
 
     kws = dict(
         frames=mean_video * 100,
         trace_mean=roi_trace * 100,
         fs=fs,
         pre_ms=window_ms,
-        ms_per_s=15,
+        ms_per_s=ms_per_s,
         height=6,
         roi_collection=roi_collection,
         roi_name="Hi 1",
