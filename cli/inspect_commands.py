@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 from ..io.svd_video import SVDVideo
-from ..io.pipeline import load_config, load_session_config, session_paths
+from ..io.pipeline import load_config, load_session_config
 from ..timeseries.rois import ROICollection
 from ..timeseries.events import despike_impute
 from ..timeseries.filtering import frequency_filter
@@ -25,7 +25,28 @@ from pathlib import Path
 @click.command()
 @input_output_options
 @click.option(
-    "--pipeline-cfg", type=str, required=True, help="Path to pipeline config TOML file."
+    "--session_toml",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to session.toml file (uses band_cuts for filtering)",
+)
+@click.option(
+    "--rois", 
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to ROIs file for display",
+)
+@click.option(
+    "--traces",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to traces file for filtering and spectral analysis",
+)
+@click.option(
+    "--events",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to events file for despiking traces.",
 )
 @click.option(
     "--despike-window-ms",
@@ -41,24 +62,22 @@ from pathlib import Path
 )
 def inspect_filters_cmd(
     input_path: str,
+    session_toml: str,
+    rois: str,
+    traces: str,
+    events: str,
     output_path: str,
-    pipeline_cfg: str,
     despike_window_ms: float,
     despike_savgol_ms: float,
 ):
-    # Path to directory containing session.toml
-    input_path = Path(input_path)
     # Path to directory where plots should be saved; optionally containing {session.name}
     output_path = Path(output_path)
-    
-    session = load_session_config(input_path / "session.toml")
-    # Constructs paths as <data_dir>/<session_name>/<data-file-name>
-    paths = session_paths(input_path.parent, session)
 
-    raw_video = SVDVideo.load(paths.raw_video)
-    spatial_rois = ROICollection.load(paths.spatial_rois)
-    spatial_traces = Traces.from_mat(paths.spatial_traces)
-    spikes = Events.from_mat(paths.spatial_spikes)
+    session = load_session_config(session_toml)
+    raw_video = SVDVideo.load(input_path)
+    spatial_rois = ROICollection.load(rois)
+    spatial_traces = Traces.from_mat(traces)
+    spikes = Events.from_mat(events)
     fs = spatial_traces.fs
 
     despiked = despike_impute(
@@ -91,41 +110,61 @@ def inspect_filters_cmd(
 @click.command()
 @input_output_options
 @click.option(
+    "--session_toml",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to session.toml file (uses fs and session name)",
+)
+@click.option(
+    "--raw_video",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to raw video SVD file",
+)
+@click.option(
+    "--mc_video",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to motion-corrected video SVD file",
+)
+@click.option(
+    "--mc_shifts",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to motion correction shifts CSV file",
+)
+@click.option(
     "--target-fs",
     type=float,
     default=10.0,
     help='Target playback framerate for video comparison',
 )
-@click.option("--filename", nargs=2, multiple=True, type=(str, str))
+@click.option(
+    "--target-gamma",
+    type=float,
+    default=0.2,
+    help='Target mean [0, 1] for framewise luminance correction. If negative, no correction is applied.',
+)
 def inspect_mc_cmd(
     input_path: str,
+    session_toml: str,
+    raw_video: str,
+    mc_video: str,
+    mc_shifts: str,
     output_path: str,
     target_fs: float,
-    filename
+    target_gamma: float,
 ):
     # Path to directory containing session.toml
     input_path = Path(input_path)
     # Path to directory where plots should be saved; optionally containing {session.name}
     output_path = Path(output_path)
 
-    # Constructs paths as <data_dir>/<session_name>/<data-file-name>
-    session = load_session_config(input_path / "session.toml")
-    paths = session_paths(input_path.parent, session)
+    session = load_session_config(session_toml)
 
-    print(paths.session_dir)
-    print(paths.raw_video)
-    print(paths.mc_video)
-    print(paths.mc_shifts)
-    overrides = {k: v for k, v in filename}
-    raw_filename = overrides.get("raw_video", paths.raw_video)
-    mc_filename = overrides.get("mc_video", paths.mc_video)
-    shifts_filename = overrides.get("mc_shifts", paths.mc_shifts)
-    print(raw_filename)
-    print(mc_filename)
-    print(shifts_filename)
-    raw_video = SVDVideo.load(raw_filename)
-    mc_video = SVDVideo.load(mc_filename)
-    shifts = np.loadtxt(shifts_filename, delimiter=",", skiprows=1)
+    raw_video = SVDVideo.load(raw_video)
+    mc_video = SVDVideo.load(mc_video)
+    shifts = np.loadtxt(mc_shifts, delimiter=",", skiprows=1)
 
     plotter = setup_plotter()
     plotter.plot_dir = str(output_path).format(session=session)
@@ -138,4 +177,5 @@ def inspect_mc_cmd(
         fs=session.fs,
         target_fs=target_fs,
         output_path=str(Path(plotter.plot_dir) / "mc-comparison.mp4"),
+        target_gamma=target_gamma,
     )

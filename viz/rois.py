@@ -107,6 +107,7 @@ def gamma_correct(images: np.ndarray, target: float = 0.5) -> np.ndarray:
 
     images : array, shape (..., H, W)
     target : desired geometric mean in normalized [0, 1] space (default 0.5)
+    - If negative, no correction is applied.
 
     Steps kept as pseudocode comments in the function body.
     """
@@ -133,7 +134,7 @@ def gamma_correct(images: np.ndarray, target: float = 0.5) -> np.ndarray:
         gmean = float(scipy.stats.gmean(np.clip(norm.ravel(), eps, None)))
 
         # 3. compute gamma = ln(target) / ln(mean) and apply
-        if gmean <= 0:
+        if gmean <= 0 or target <= 0:
             gamma = 1.0
         else:
             gamma = np.log(target) / np.log(gmean)

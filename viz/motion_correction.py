@@ -16,6 +16,7 @@ def compare_videos(
     max_rank: int = None,
     stack="v",
     output_path: str = None,
+    target_gamma: float = 0.2,
 ):
     frame_hop = int(fs / target_fs)
     output_fps = fs / frame_hop
@@ -36,8 +37,8 @@ def compare_videos(
     info(f"Reconstructed videos: {raw_slice.shape}")
 
     # Gamma-correct each framewise
-    raw_slice = gamma_correct(raw_slice, target=0.2)
-    mc_slice = gamma_correct(mc_slice, target=0.2)
+    raw_slice = gamma_correct(raw_slice, target=target_gamma)
+    mc_slice = gamma_correct(mc_slice, target=target_gamma)
 
     # Concatenate and save/return
     if stack == "v":
