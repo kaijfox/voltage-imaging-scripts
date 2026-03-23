@@ -37,8 +37,8 @@ def compare_videos(
     info(f"Reconstructed videos: {raw_slice.shape}")
 
     # Gamma-correct each framewise
-    raw_slice = gamma_correct(raw_slice, target=target_gamma)
-    mc_slice = gamma_correct(mc_slice, target=target_gamma)
+    raw_slice = gamma_correct(raw_slice, target=target_gamma, shared=True)
+    mc_slice = gamma_correct(mc_slice, target=target_gamma, shared=True)
 
     # Concatenate and save/return
     if stack == "v":

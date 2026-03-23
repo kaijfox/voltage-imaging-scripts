@@ -116,12 +116,6 @@ def inspect_filters_cmd(
     help="Path to session.toml file (uses fs and session name)",
 )
 @click.option(
-    "--raw_video",
-    type=click.Path(exists=True),
-    required=True,
-    help="Path to raw video SVD file",
-)
-@click.option(
     "--mc_video",
     type=click.Path(exists=True),
     required=True,
@@ -148,21 +142,18 @@ def inspect_filters_cmd(
 def inspect_mc_cmd(
     input_path: str,
     session_toml: str,
-    raw_video: str,
     mc_video: str,
     mc_shifts: str,
     output_path: str,
     target_fs: float,
     target_gamma: float,
 ):
-    # Path to directory containing session.toml
-    input_path = Path(input_path)
     # Path to directory where plots should be saved; optionally containing {session.name}
     output_path = Path(output_path)
 
     session = load_session_config(session_toml)
 
-    raw_video = SVDVideo.load(raw_video)
+    raw_video = SVDVideo.load(input_path)
     mc_video = SVDVideo.load(mc_video)
     shifts = np.loadtxt(mc_shifts, delimiter=",", skiprows=1)
 

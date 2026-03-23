@@ -72,6 +72,46 @@ def footprint_mask(image_shape, footprint):
     return mask
 
 
+def crop_video_around_rois(video, roi_collection, roi_names, pad_px: int = 30):
+    """Crop a (T, H, W) video around the footprints of roi_names.
+
+    Parameters
+    ----------
+    video : array-like
+        Video with shape (T, H, W).
+    roi_collection : ROICollection
+        Collection containing ROI footprints and ids.
+    roi_names : sequence
+        List of ROI ids/names (strings) or integer indices specifying which
+        ROIs to include in the crop.
+    pad_px : int
+        Padding in pixels to add on each side of the bounding box.
+
+    Returns
+    -------
+    vid_crop : ndarray
+        The cropped video array with shape (T, rows, cols).
+    (row_slice, col_slice) : tuple(slice, slice)
+        The slices used to index the original video: (slice(row0,row1), slice(col0,col1)).
+
+    Notes
+    -----
+    - STUB: Implementation replaced by pseudocode comments per task requirements.
+    """
+    # Pseudocode (STUB - no implementation):
+    # - Validate that `video` is an array-like with shape (T, H, W).
+    # - Resolve ROI indices from `roi_collection.ids` when provided; accept integer indices.
+    # - For each resolved ROI index, read `roi.footprint` (expected shape (N,2)) and collect footprints.
+    # - If no footprints are found: add a @blocker: comment describing missing footprints.
+    # - Stack all footprints and compute min/max row and column coordinates.
+    # - Apply pad_px to expand the bounding box; clip coordinates to image bounds (video.shape[1:], H and W).
+    # - Construct row_slice and col_slice (slice objects) and use them to index the original video.
+    # - Return the cropped video (vid[:, row_slice, col_slice]) and the (row_slice, col_slice) tuple.
+    # @unknown: Exact attribute names for ROI objects (e.g., `footprint` vs `mask`) and behavior when `roi_collection.ids` is absent.
+    # @blocker: If ROI names are missing from `roi_collection.ids` the expected error handling is unspecified.
+    pass
+
+
 def mean_image(svd_video: "SVDVideo") -> np.ndarray:
     """Compute mean image in SVD video space.
 
@@ -102,49 +142,40 @@ def mean_image(svd_video: "SVDVideo") -> np.ndarray:
     return image
 
 
-def gamma_correct(images: np.ndarray, target: float = 0.5) -> np.ndarray:
+def gamma_correct(images: np.ndarray, target: float = 0.5, shared: bool = False) -> np.ndarray:
     """Gamma-correct image(s) to push their geometric mean intensity toward target.
 
     images : array, shape (..., H, W)
     target : desired geometric mean in normalized [0, 1] space (default 0.5)
-    - If negative, no correction is applied.
-
-    Steps kept as pseudocode comments in the function body.
+        If negative, no correction is applied (gamma=1).
+    shared : bool, default False
+        If False, normalization and gmean are computed per image over axes (-2,-1).
+        If True, they are computed over the entire array.
     """
-    img = np.asarray(images)
-    orig_shape = img.shape
-    if img.ndim == 2:
-        imgs = img[None, ...]
-    else:
-        imgs = img.reshape((-1,) + orig_shape[-2:])
-
-    out = np.empty_like(imgs, dtype=float)
+    img = np.asarray(images, dtype=float)
     eps = 1e-12
+    reduce_axes = None if shared else (-2, -1)
 
-    for i, im in enumerate(imgs):
-        # 1. Normalize each image [0, 1]
-        minv = float(np.nanmin(im))
-        maxv = float(np.nanmax(im))
-        if maxv - minv < eps:
-            norm = np.zeros_like(im, dtype=float)
-        else:
-            norm = (im - minv) / (maxv - minv)
+    # Normalize to [0, 1]; where range is zero set divisor=1 (maps to uniform zero)
+    minv = np.nanmin(img, axis=reduce_axes, keepdims=True)
+    maxv = np.nanmax(img, axis=reduce_axes, keepdims=True)
+    divisor = np.where((maxv - minv) < eps, 1.0, maxv - minv)
+    norm = (img - minv) / divisor
 
-        # 2. Compute geometric mean intensity for each image
-        gmean = float(scipy.stats.gmean(np.clip(norm.ravel(), eps, None)))
+    # Clip norm to [0, 1], then clip from below at eps for gmean safety
+    np.clip(norm, 0.0, 1.0, out=norm)
+    gmean_input = np.clip(norm, eps, None)
 
-        # 3. compute gamma = ln(target) / ln(mean) and apply
-        if gmean <= 0 or target <= 0:
-            gamma = 1.0
-        else:
-            gamma = np.log(target) / np.log(gmean)
-        corrected = np.clip(norm, 0.0, 1.0) ** gamma
-        out[i] = corrected
+    # Compute per-image (or global) geometric mean
+    gmean = scipy.stats.gmean(gmean_input, axis=reduce_axes, keepdims=True)
 
-    if img.ndim == 2:
-        return out[0]
+    # Compute gamma; if target <= 0, gamma=1 leaves norm unchanged
+    if target <= 0:
+        gamma = 1.0
     else:
-        return out.reshape(orig_shape)
+        gamma = np.log(target) / np.log(gmean)
+
+    return norm ** gamma
 
 # def quantile_normalize(arr, n_quantiles=256, vmin=None, vmax=None, cmap=None)
 
