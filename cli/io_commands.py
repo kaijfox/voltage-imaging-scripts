@@ -271,7 +271,7 @@ def slice_cmd(
 @input_output_options
 @batch_progress_options(1000)
 @click.option("--start", type=int, default=0, help="Start frame for resume.")
-@click.option("--chunk", type=int, default=None, multiple=True, help="Chunk size for output dataset.")
+@click.option("--chunk", type=int, default=None, nargs=3, help="Chunk size for output dataset.")
 def h5_convert(input_path, output_path, batch_size, no_progress, start, chunk):
     """Stream RAW video frames to HDF5 store."""
     from ..io.h5_conversion import stream_framereader
