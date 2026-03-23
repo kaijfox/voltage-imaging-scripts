@@ -272,6 +272,10 @@ class GuidedSVDResult:
             f.attrs['orthogonal'] = True
             f.attrs['second_pass_type'] = "guided"
 
+def _clean_footprints(footprints, min_px=10):
+    ret = [*footprints]
+    ret = [fp for fp in ret if len(fp) > min_px]
+    return ret
 
 
 def guided_svd(
@@ -293,6 +297,8 @@ def guided_svd(
     Returns GuidedSVDResult with U (T_used, max_rank), S (max_rank,), Vt (max_rank, H, W).
     """
     end_frame = end_frame or frames.shape[0]
+    footprints = _clean_footprints(footprints)
+
     info(f"Computing guide vectors")
     Q = compute_guide_vectors(
         frames,
