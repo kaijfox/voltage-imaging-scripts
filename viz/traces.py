@@ -825,6 +825,7 @@ class TraceComposer:
                         dcc.Graph(
                             id="graph",
                             figure=self.build_figure(default_rois, default_layers),
+                            style={"height": "640px"}
                         )
                     ],
                 ),

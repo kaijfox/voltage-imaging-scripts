@@ -1,8 +1,9 @@
+from imaging_scripts.timeseries.events import embed_events
 import numpy as np
 import awkward as ak
 import pandas as pd
 from typing import Tuple, Optional, Sequence, Any, Union
-from scipy import ndimage
+from scipy import ndimage, signal
 
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
@@ -15,6 +16,9 @@ from .types import Traces, Events
 from .ols_streaming import extract_traces
 from .spike_analysis import ms_to_samples, peak_to_trough
 from .filtering import filter_dff
+from ..viz.psth_grid import override_kws
+from ..viz.rois import mean_image
+from .spatial import dark_mask
 
 
 def qc_trace_extraction_1(
@@ -285,7 +289,7 @@ def qc_trace_extraction_5(
         - "corrected", "corrected_hp": raw/detrended soma traces with background removed
         - "bg_component", "bg_component_hp": component of original soma traces removed
     """
-    
+
     extract_kws = dict(neuropil_range=(-1, -1), ols=False, weighted=False, fs=fs)
     soma_raw, _ = extract_traces(video, soma_rois, **extract_kws)
     bg_raw, _ = extract_traces(video, background_rois, **extract_kws)
@@ -313,58 +317,210 @@ def qc_trace_extraction_5(
         "bg_raw": bg_raw,
         "hp": soma_hp,
         "bg_hp": bg_hp,
-        "corrected": soma_corrected_raw,
-        "corrected_hp": soma_corrected_hp,
-        "bg_component": bg_component_raw,
-        "bg_component_hp": bg_component_hp,
+        "baseline": soma_baseline,
+        "bg_baseline": bg_baseline,
+        "corrected": Traces(soma_corrected_raw, soma_raw.ids, soma_raw.fs),
+        "corrected_hp": Traces(soma_corrected_hp, soma_raw.ids, soma_raw.fs),
+        "bg_component": Traces(bg_component_raw, soma_raw.ids, soma_raw.fs),
+        "bg_component_hp": Traces(bg_component_hp, soma_raw.ids, soma_raw.fs),
     }
 
-    
+
+def qc_trace_extraction_6(
+    video: Traces,
+    soma_rois: ROICollection,
+    fs: float,
+    hpf_ms: float,
+    detrend_mode: str = "savgol_add",
+    npil_kws=dict(),
+    dark_noise: float = 0.0,
+):
+    # Choose neuropil filtering parameters
+    npil_kws = override_kws(
+        npil_kws,
+        thresh_global=0.1,
+        thresh_local=0.3,
+        sigma=20,
+        bite=20,
+        radius=80,
+        min_size=3,
+        smooth_size=None,
+    )
+    snapshot = mean_image(video)
+    background_rois, _, background_masks = dark_mask(snapshot, soma_rois, **npil_kws)
+
+    # Identical to trace extraction 5, but uses individual background ROIs
+    extract_kws = dict(neuropil_range=(-1, -1), ols=False, weighted=False, fs=fs)
+    soma_raw, _ = extract_traces(video, soma_rois, **extract_kws)
+    bg_raw, _ = extract_traces(video, background_rois, **extract_kws)
+
+    # remove dark noise from raw traces
+    soma_raw = Traces(soma_raw.data - dark_noise, soma_raw.ids, soma_raw.fs)
+    bg_raw = Traces(bg_raw.data - dark_noise, bg_raw.ids, bg_raw.fs)
+
+    dff_kw = dict(
+        mode=detrend_mode,
+        window_length=ms_to_samples(hpf_ms, fs),
+        return_fit=True,
+    )
+    soma_hp, soma_baseline, soma_baseline_params = filter_dff(soma_raw, **dff_kw)
+    bg_hp, bg_baseline, bg_baseline_params = filter_dff(bg_raw, **dff_kw)
+
+    bg_component_hp = np.zeros_like(soma_hp.data)
+    bg_component_raw = np.zeros_like(soma_hp.data)
+    soma_corrected_hp = np.zeros_like(soma_hp.data)
+    soma_corrected_raw = np.zeros_like(soma_hp.data)
+
+    for rid in range(len(soma_hp.ids)):
+        X = bg_hp.data[rid].reshape(-1, 1)
+        y = soma_hp.data[rid]
+        pred = LinearRegression(fit_intercept=False).fit(X, y).predict(X)
+        soma_corrected_hp[rid] = y - pred
+        bg_component_hp[rid] = pred
+        soma_corrected_raw[rid] = y - pred + soma_baseline.data[rid]
+        bg_component_raw[rid] = pred + bg_baseline.data[rid]
+
+    return (
+        {
+            "raw": soma_raw,
+            "bg_raw": bg_raw,
+            "hp": soma_hp,
+            "bg_hp": bg_hp,
+            "baseline": soma_baseline,
+            "bg_baseline": bg_baseline,
+            "corrected": Traces(soma_corrected_raw, soma_raw.ids, soma_raw.fs),
+            "corrected_hp": Traces(soma_corrected_hp, soma_raw.ids, soma_raw.fs),
+            "bg_component": Traces(bg_component_raw, soma_raw.ids, soma_raw.fs),
+            "bg_component_hp": Traces(bg_component_hp, soma_raw.ids, soma_raw.fs),
+            "soma_baseline_params": soma_baseline_params,
+            "bg_baseline_params": bg_baseline_params,
+        },
+        background_rois,
+        background_masks,
+    )
 
 
+def _pos_std_window(arr, axis=-1, window=None):
+    if window is not None:
+        arr_moved = np.moveaxis(arr, axis, -1)  # (..., T)
+        arr_flat = np.reshape(arr_moved, (-1, arr_moved.shape[-1]))  # (N, T)
+        masked = np.where(arr_flat > 0, arr_flat, np.nan)
+        df = pd.DataFrame(masked.T)
+        std_flat = df.rolling(
+            window=window, center=True, min_periods=min(window / 2, 40)
+        ).std()
+        std_flat = std_flat.interpolate("linear").bfill()
+        std = std_flat.values.T.reshape(arr_moved.shape)  # (..., T)
+        return np.moveaxis(std, -1, axis)  # original axis order
+    else:
+        mask = arr > 0
+        masked_arr = np.where(mask, arr, np.nan)
+        return np.nanstd(masked_arr, axis=axis, keepdims=True)
 
-def embed_events(
-    values: ak.Array,
-    spike_frames: ak.Array,
-    n_frames: int,
-    fill_value=np.nan,
-) -> np.ndarray:
-    """Embed per-event values into dense per-ROI time series.
+def _pos_std(arr, axis=-1):
+    mask = arr > 0
+    masked_arr = np.where(mask, arr, np.nan)
+    return np.nanstd(masked_arr, axis=axis, keepdims=True)
 
-    Parameters
-    ----------
-    values : ak.Array
-        Awkward array of scalar event values for each ROI; shape is
-        (n_rois, <n_events>) where ``<n_events>`` denotes a variable-length
-        inner dimension (events per ROI).
-    spike_frames : ak.Array
-        Awkward array of integer frame indices corresponding to events in
-        ``values``. Indices are in the range ``[0, n_frames-1]``.
-    n_frames : int
-        Length of the output time axis (number of frames).
-    fill_value : scalar, default np.nan
-        Value to fill in for non-event frames
 
-    Returns
-    -------
-    out : np.ndarray
-        Dense NumPy array with embedded event values at their corresponding
-        frame indices and ``np.nan`` elsewhere. Shape is (n_rois, n_frames).
+def detect_peaks(
+    trace,
+    threshold=6,
+    window=150,
+    dist=None,
+    gap_ms=None,
+    std_window=None,
+):
     """
-    # values: ak array (n_rois, <n_events>) of scalars
-    # spike_frames: ak array (n_rois, <n_events>) of int frame indices
-    n_rois = len(values)
-    out = np.full((n_rois, n_frames), fill_value, dtype=float)
+    Detect peaks using only the median rolling method and a fixed prominence of 2.0.
+    Returns: (std_traces, events, info)
+    """
+    # median rolling path only
+    half_win = ms_to_samples(window, trace.fs) // 2
+    roll = np.lib.stride_tricks.sliding_window_view(
+        trace.data, window_shape=2 * half_win + 1, axis=-1
+    )
+    trend = np.median(roll, axis=-1)
+    vmhigh = trace.data[..., half_win:-half_win] - trend
+    vmhigh = np.concatenate(
+        [
+            np.full((*trace.data.shape[:-1], half_win), 0),
+            vmhigh,
+            np.full((*trace.data.shape[:-1], half_win), 0),
+        ],
+        axis=-1,
+    )
+    standard_dev = _pos_std_window(vmhigh, window=std_window)
+    std = -vmhigh / standard_dev
 
-    for i in range(n_rois):
-        # get indices and values for ROI i
-        idxs = spike_frames[i].to_list()
-        if len(idxs) == 0:
-            continue
-        vals = values[i].to_numpy()
-        out[i, idxs] = vals
+    kw = dict(
+        height=threshold,
+        distance=dist,
+        prominence=2.0,
+        wlen=ms_to_samples(gap_ms, trace.fs) if gap_ms is not None else None,
+    )
+    event_frames = [signal.find_peaks(arr, **kw)[0] for arr in std]
+    return (
+        Traces(std, trace.ids, trace.fs),
+        Events(event_frames, trace.ids, {}),
+        Traces(standard_dev, trace.ids, trace.fs),
+    )
 
-    return out
+def _detect_peaks_2(
+    trace, threshold=6, window=150, dist=None, gap_ms=None, method="median"
+):
+    """
+    Detect peaks using only the median rolling method and a fixed prominence of 2.0.
+    Returns: (std_traces, events, info)
+    """
+
+    # Rolling median HPF
+    if method == "median":
+        half_win = ms_to_samples(window, trace.fs) // 2
+        roll = np.lib.stride_tricks.sliding_window_view(
+            trace.data, window_shape=2 * half_win + 1, axis=-1
+        )
+        vmlow = np.median(roll, axis=-1)
+        vmhigh = trace.data[..., half_win:-half_win] - vmlow
+        vmhigh = np.concatenate(
+            [
+                np.full((*trace.data.shape[:-1], half_win), 0),
+                vmhigh,
+                np.full((*trace.data.shape[:-1], half_win), 0),
+            ],
+            axis=-1,
+        )
+
+    # Rolling mean HPF
+    # Combining rolling average with second order SavGol improves results (per Cara)
+    elif method == "double_filt":
+        window = ms_to_samples(window, trace.fs)
+        moving_avg = signal.savgol_filter(
+            trace.data, window_length=window, polyorder=0, axis=-1
+        )
+        second_ord = signal.savgol_filter(
+            trace.data, window_length=window, polyorder=1, axis=-1
+        )
+        vmlow = (moving_avg - second_ord) / 2
+        vmhigh = trace.data - vmlow
+
+    standard_dev = _pos_std_window(vmhigh, axis=-1)
+    std = -(vmhigh - vmhigh.mean(axis=-1, keepdims=True)) / standard_dev
+
+    kw = dict(
+        height=threshold,
+        distance=dist,
+        prominence=2.0,
+        wlen=ms_to_samples(gap_ms, trace.fs) if gap_ms is not None else None,
+    )
+    event_frames = [signal.find_peaks(arr, **kw)[0] for arr in std]
+    return (
+        Events(event_frames, trace.ids, {}),
+        Traces(vmlow, trace.ids, trace.fs),
+        Traces(vmhigh, trace.ids, trace.fs),
+        standard_dev,
+    )
+
 
 
 def rolling_window(

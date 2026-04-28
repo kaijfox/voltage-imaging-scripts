@@ -78,6 +78,7 @@ def estimate_shifts(
     R: np.ndarray,
     max_shift: int | None = None,
     batch_limit: int = 4000 * 4000,
+    return_corr = False,
 ) -> np.ndarray:
     """
     Per-frame integer shifts via latent-space phase correlation.
@@ -114,6 +115,8 @@ def estimate_shifts(
 
     Vhat_flat = Vhat.reshape(rank, -1)  # (rank, H*W)
     shifts_out = np.empty((T, 2), dtype=int)
+    if return_corr:
+        corrs = np.empty((T, H, Wpix), dtype=np.float32)
 
     Vhat_R = Vhat_flat * R.reshape(1, -1) # (rank, H*W)
     space_basis = ifft2(Vhat_R.reshape(rank, H, Wpix)).reshape(rank, -1)
@@ -131,11 +134,16 @@ def estimate_shifts(
         peak_rows, peak_cols = np.unravel_index(idx, (H, Wpix))
         shifts_out[start:end, 0] = peak_rows - center[0]
         shifts_out[start:end, 1] = peak_cols - center[1]
+        if return_corr:
+            corrs[start:end] = cc_shifted.astype(np.float32)
 
     if max_shift is not None:
         # Zero out shifts whose magnitude exceeds max_shift (unreliable / too large)
         magnitude = np.sqrt(shifts_out[:, 0] ** 2 + shifts_out[:, 1] ** 2)
         shifts_out[magnitude > max_shift] = 0
+
+    if return_corr:
+        return shifts_out, corrs
     return shifts_out
 
 

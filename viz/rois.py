@@ -73,12 +73,13 @@ def footprint_mask(image_shape, footprint):
 
 
 def crop_video_around_rois(video, roi_collection, roi_names, pad_px: int = 30):
-    """Crop a (T, H, W) video around the footprints of roi_names.
+    """Return row/col slice objects that bound the union of footprints for roi_names.
 
     Parameters
     ----------
-    video : array-like
-        Video with shape (T, H, W).
+    video : SVDVideo or array-like
+        Video used to infer spatial shape. For SVDVideo the spatial shape is taken
+        from ``video.Vt.shape[1:]``; for an ndarray the spatial shape is ``video.shape[1:]``.
     roi_collection : ROICollection
         Collection containing ROI footprints and ids.
     roi_names : sequence
@@ -89,27 +90,47 @@ def crop_video_around_rois(video, roi_collection, roi_names, pad_px: int = 30):
 
     Returns
     -------
-    vid_crop : ndarray
-        The cropped video array with shape (T, rows, cols).
     (row_slice, col_slice) : tuple(slice, slice)
-        The slices used to index the original video: (slice(row0,row1), slice(col0,col1)).
-
-    Notes
-    -----
-    - STUB: Implementation replaced by pseudocode comments per task requirements.
+        Slice objects that can be used to index the original video: (slice(row0,row1), slice(col0,col1)).
     """
-    # Pseudocode (STUB - no implementation):
-    # - Validate that `video` is an array-like with shape (T, H, W).
-    # - Resolve ROI indices from `roi_collection.ids` when provided; accept integer indices.
-    # - For each resolved ROI index, read `roi.footprint` (expected shape (N,2)) and collect footprints.
-    # - If no footprints are found: add a @blocker: comment describing missing footprints.
-    # - Stack all footprints and compute min/max row and column coordinates.
-    # - Apply pad_px to expand the bounding box; clip coordinates to image bounds (video.shape[1:], H and W).
-    # - Construct row_slice and col_slice (slice objects) and use them to index the original video.
-    # - Return the cropped video (vid[:, row_slice, col_slice]) and the (row_slice, col_slice) tuple.
-    # @unknown: Exact attribute names for ROI objects (e.g., `footprint` vs `mask`) and behavior when `roi_collection.ids` is absent.
-    # @blocker: If ROI names are missing from `roi_collection.ids` the expected error handling is unspecified.
-    pass
+    # Normalize roi_names to a list
+    if isinstance(roi_names, (str, int)):
+        roi_names = [roi_names]
+
+    # Use ROICollection indexing to resolve names/indices to a subset collection
+    sel = roi_collection[roi_names]
+
+    # Collect footprints (n_pixels, 2) arrays
+    footprints = [r.footprint for r in sel.rois if getattr(r, "footprint", None) is not None and len(r.footprint) > 0]
+    if len(footprints) == 0:
+        raise ValueError("No footprints found for provided roi_names")
+
+    fp = np.concatenate(footprints, axis=0)
+
+    # Determine spatial shape (H, W)
+    if hasattr(video, "Vt"):
+        # SVDVideo: Vt shape is (rank, H, W, ...). Take first two spatial dims if present.
+        spatial_shape = np.asarray(video.Vt.shape[1:])
+        if spatial_shape.size < 2:
+            raise ValueError("Unexpected spatial dimensions on video.Vt")
+        H, W = int(spatial_shape[0]), int(spatial_shape[1])
+    elif hasattr(video, "shape") and len(video.shape) >= 3:
+        H, W = int(video.shape[1]), int(video.shape[2])
+    else:
+        raise ValueError("Cannot infer spatial shape from provided video object")
+
+    rmin, rmax = int(fp[:, 0].min()), int(fp[:, 0].max())
+    cmin, cmax = int(fp[:, 1].min()), int(fp[:, 1].max())
+
+    r0 = max(rmin - int(pad_px), 0)
+    r1 = min(rmax + int(pad_px), H - 1)
+    c0 = max(cmin - int(pad_px), 0)
+    c1 = min(cmax + int(pad_px), W - 1)
+
+    row_slice = slice(r0, r1 + 1)
+    col_slice = slice(c0, c1 + 1)
+
+    return row_slice, col_slice
 
 
 def mean_image(svd_video: "SVDVideo") -> np.ndarray:

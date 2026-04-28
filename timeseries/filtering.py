@@ -14,9 +14,8 @@ def double_exponential_curve(t, a, b, c, d, e):
     c = max(c, 0)
     return a * np.exp(b * t) + c * np.exp(d * t) + e
 
-
 def filter_dff(
-    traces: Traces, mode: str, window_length: int = 301, polyorder: int = 2
+    traces: Traces, mode: str, window_length: int = 301, polyorder: int = 2, return_fit = False,
 ) -> Tuple[Traces]:
     """
     Compute dF/F0 from raw traces.
@@ -34,15 +33,16 @@ def filter_dff(
 
     logger, (error, warning, info, debug) = configure_logging("filter")
 
-    if mode not in ["savgol_add", "savgol_mult", "2exp"]:
+    if mode not in ["savgol_add", "savgol_mult", "2exp", "2exp_add", "med_add"]:
         raise ValueError(f"Unknown df/f filtering mode: {mode}")
 
     data = traces.data
+    fits = []
 
-    if mode == "2exp":
+    if mode == "2exp" or mode == "2exp_add":
         dff = np.zeros_like(data)
         baseline = np.zeros_like(data)
-
+        
         T = data.shape[1]
         time = np.arange(T)
         for i in range(data.shape[0]):
@@ -61,26 +61,40 @@ def filter_dff(
             decay_end = min(np.median(np.diff(log_data[T // 4 :])), 0)
             p0 = (data_range, decay_start, data_range, decay_end, data_min)
             bounds = (
-                (0, -np.inf, 0, -np.inf, -np.inf),
+                (0, -np.inf, 0, -np.inf, 0),
                 (np.inf, 0, np.inf, 0, np.inf),
             )
+
+            # Median filter the data: high freq noise & transients not relevant
+            # and slow down fitting
+            n_bins = T // window_length
+            X = time[:n_bins * window_length].reshape(n_bins, window_length).mean(axis=1)
+            Y = np.median(data[i, :n_bins * window_length].reshape(n_bins, window_length), axis=1)
 
             # Curve fit and remove baseline
             try:
                 popt, _ = curve_fit(
                     double_exponential_curve,
-                    time,
-                    data[i],
+                    X,
+                    Y,
                     p0=p0,
                     bounds=bounds,
                     maxfev=10000,
                 )
+                fits.append(popt)
             except RuntimeError:
-                warning(f"Curve fit failed for trace {i}, not filtering")
-                dff[i] = data[i]
+                warning(f"Curve fit failed for trace {i}, falling back 5s savgol")
+                baseline[i] = signal.savgol_filter(data[i], traces.fs * 5, 2)
+                if mode == "2exp_add":
+                    dff[i] = data[i] - baseline[i]
+                else:
+                    dff[i] = data[i] / baseline[i]
                 continue
             baseline[i] = double_exponential_curve(time, *popt)
-            dff[i] = data[i] / baseline[i]
+            if mode == "2exp_add":
+                dff[i] = data[i] - baseline[i]
+            else:
+                dff[i] = data[i] / baseline[i]
 
     if mode == "savgol_add":
         baseline = signal.savgol_filter(data, window_length, polyorder, axis=1)
@@ -90,10 +104,15 @@ def filter_dff(
         baseline = signal.savgol_filter(data, window_length, polyorder, axis=1)
         dff = data / baseline
 
+    if mode == "med_add":
+        window_length = (window_length // 2) * 2 + 1  # ensure odd
+        baseline = signal.medfilt(data, kernel_size=(1, window_length))
+        dff = data - baseline
+
     return (
         Traces(dff, traces.ids, traces.fs),
         Traces(baseline, traces.ids, traces.fs),
-    )
+    ) + (fits,) if return_fit else ()
 
 
 def frequency_filter(

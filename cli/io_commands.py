@@ -4,6 +4,7 @@ import click
 from pathlib import Path
 import time
 import numpy as np
+import h5py
 
 from .common import (
     input_output_options,
@@ -274,7 +275,7 @@ def slice_cmd(
 @click.option("--chunk", type=int, default=None, nargs=3, help="Chunk size for output dataset.")
 def h5_convert(input_path, output_path, batch_size, no_progress, start, chunk):
     """Stream RAW video frames to HDF5 store."""
-    from ..io.h5_conversion import stream_framereader
+    from ..io.h5_conversion import stream_framereader, stream_svd_video
 
     logger, (error, *_) = configure_logging("converter")
 
@@ -282,14 +283,34 @@ def h5_convert(input_path, output_path, batch_size, no_progress, start, chunk):
         raise click.BadParameter("--batch-size must be > 0")
 
     try:
-        stream_framereader(
-            input_path=input_path,
-            output_path=output_path,
-            batch_size=batch_size,
-            progress=not no_progress,
-            start=start,
-            chunk=chunk,
-        )
+        # Detect SVDVideo HDF5 by checking for 'U' and 'Vh' datasets
+        use_svd = False
+        try:
+            with h5py.File(input_path, "r") as f:
+                if "U" in f and "Vh" in f:
+                    use_svd = True
+        except OSError:
+            # Non-HDF5 file or file access error -> treat as non-SVD input
+            use_svd = False
+
+        if use_svd:
+            stream_svd_video(
+                input_path=input_path,
+                output_path=output_path,
+                batch_size=batch_size,
+                progress=not no_progress,
+                start=start,
+                chunk=chunk,
+            )
+        else:
+            stream_framereader(
+                input_path=input_path,
+                output_path=output_path,
+                batch_size=batch_size,
+                progress=not no_progress,
+                start=start,
+                chunk=chunk,
+            )
     except Exception as exc:
         error(f"Conversion failed: {exc}")
         raise

@@ -9,7 +9,6 @@ import awkward as ak
 
 from .types import Events, Traces
 from ..cli.common import configure_logging
-from .qc_analysis import embed_events
 
 
 def detect_spikes(
@@ -215,6 +214,50 @@ def despike(
     return despiked, waveforms
 
 
+def embed_events(
+    values: ak.Array,
+    spike_frames: ak.Array,
+    n_frames: int,
+    fill_value=np.nan,
+) -> np.ndarray:
+    """Embed per-event values into dense per-ROI time series.
+
+    Parameters
+    ----------
+    values : ak.Array
+        Awkward array of scalar event values for each ROI; shape is
+        (n_rois, <n_events>) where ``<n_events>`` denotes a variable-length
+        inner dimension (events per ROI).
+    spike_frames : ak.Array
+        Awkward array of integer frame indices corresponding to events in
+        ``values``. Indices are in the range ``[0, n_frames-1]``.
+    n_frames : int
+        Length of the output time axis (number of frames).
+    fill_value : scalar, default np.nan
+        Value to fill in for non-event frames
+
+    Returns
+    -------
+    out : np.ndarray
+        Dense NumPy array with embedded event values at their corresponding
+        frame indices and ``np.nan`` elsewhere. Shape is (n_rois, n_frames).
+    """
+    # values: ak array (n_rois, <n_events>) of scalars
+    # spike_frames: ak array (n_rois, <n_events>) of int frame indices
+    n_rois = len(values)
+    out = np.full((n_rois, n_frames), fill_value, dtype=float)
+
+    for i in range(n_rois):
+        # get indices and values for ROI i
+        idxs = spike_frames[i].to_list()
+        if len(idxs) == 0:
+            continue
+        vals = values[i].to_numpy()
+        out[i, idxs] = vals
+
+    return out
+
+
 def despike_impute(
     traces: Traces,
     events: Events,
@@ -248,3 +291,20 @@ def despike_impute(
     imputed = np.where(nonspike_mask, data, sav)
 
     return Traces(data=imputed, ids=traces.ids, fs=traces.fs)
+
+
+def group_bursts(events: Events, interval_frames: int):
+    """
+    Returns:
+        burst_spikes: list of list of arrays
+            burst_spikes[i][j][k] is the k'th spike of the j'th burst in ROI i
+            First dimension always length = number of ROIs in events
+            Second dimension variable length equal to number of bursts
+            Third dimension variable length, always >= 1
+    """
+    burst_spikes = [
+        np.split(f, np.where(np.diff(f) > interval_frames)[0] + 1)
+        for f in events.spike_frames
+    ]
+    return burst_spikes
+        

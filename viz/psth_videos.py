@@ -319,6 +319,8 @@ def video_and_trace(
         output_fps = float(fs)
 
     def update(frame_i):
+        if frame_i % 50 == 0:
+            print(f"Rendering frame {frame_i}/{n_frames}...")
         artists = update_fn(frame_i)
         pos = (frame_i - zero) / float(fs_khz)
         line.set_xdata([pos, pos])

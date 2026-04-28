@@ -156,6 +156,10 @@ class ROICollection:
         - slice: same as slicing lists
         - list of int or list of str: return corresponding subset
         """
+        # np array -> list for simpler conditions below
+        if isinstance(key, np.ndarray):
+            key = [k.item() if isinstance(k, np.generic) and k.ndim == 0 else k for k in key]
+
         # single int
         if isinstance(key, int):
             return ROICollection(
@@ -308,7 +312,9 @@ class ROICollection:
             if colors is not None:
                 mat_dict["colors"] = np.asarray(colors)
 
-            savemat(str(path), mat_dict)
+            if path is not None:
+                savemat(str(path), mat_dict)
+            return mat_dict
         except ImportError:
             print("scipy not available, falling back to npz")
             footprints = [r.footprint for r in rois]

@@ -22,14 +22,16 @@ class Traces:
     ids: list[str]
     fs: float | None = None
 
-    def save_mat(self, path: str | Path) -> None:
+    def save_mat(self, path: str | Path = None) -> dict:
         """Save to .mat file."""
         mat_dict = {"data": self.data}
         if self.ids is not None:
             mat_dict["ids"] = np.array(self.ids, dtype=str)
         if self.fs is not None:
             mat_dict["fs"] = self.fs
-        sio.savemat(str(path), mat_dict)
+        if path is not None:
+            sio.savemat(str(path), mat_dict)
+        return mat_dict
 
     @classmethod
     def from_mat(cls, path: str | Path) -> "Traces":
@@ -53,6 +55,10 @@ class Traces:
 
     def __getitem__(self, key) -> "Traces":
         """Subset by cell index or id."""
+        # np array -> list for simpler conditions below
+        if isinstance(key, np.ndarray):
+            key = [*key]  
+        
         if isinstance(key, int):
             return Traces(
                 data=self.data[key : key + 1], ids=[self.ids[key]], fs=self.fs
@@ -116,12 +122,12 @@ class Events:
     ids: Optional[list[str]] = None
     detection_params: dict[str, Any] = field(default_factory=dict)
 
-    def save_mat(self, path: str | Path) -> None:
+    def save_mat(self, path: str | Path = None) -> dict:
         """Save to .mat file."""
         # Convert spike_frames list to object array for MATLAB cell array
         spike_frames_arr = np.empty(len(self.spike_frames), dtype=object)
         for i, frames in enumerate(self.spike_frames):
-            spike_frames_arr[i] = frames
+            spike_frames_arr[i] = frames + 1 # Convert to 1-indexed
 
         mat_dict = {
             "spike_frames": spike_frames_arr,
@@ -133,7 +139,10 @@ class Events:
             if value is not None:
                 mat_dict["detection_params"][key] = value
 
-        sio.savemat(str(path), mat_dict)
+        if path is not None:
+            sio.savemat(str(path), mat_dict)
+
+        return mat_dict
 
     @classmethod
     def from_mat(cls, path: str | Path) -> "Events":
@@ -145,6 +154,7 @@ class Events:
             spike_frames = [spike_frames_raw.item()]
         else:
             spike_frames = [np.atleast_1d(sf) for sf in spike_frames_raw]
+        spike_frames_raw = [sf - 1 for sf in spike_frames]  # Convert from 1-indexed
 
         ids = mat.get("ids", None)
 
@@ -167,6 +177,10 @@ class Events:
     
     def __getitem__(self, key) -> "Events":
         """Subset by cell index or id."""
+        # np array -> list for simpler conditions below
+        if isinstance(key, np.ndarray):
+            key = [*key]
+        
         if isinstance(key, int):
             return Events(
                 spike_frames=[self.spike_frames[key]],
@@ -231,3 +245,42 @@ class Events:
             raise TypeError(
                 "Events must be indexed by int, str, slice, or list of int/str"
             )
+
+
+
+def save_mat(path, **data):
+    """Save multiple Trace, Events, and/or ROICollection objects to .mat
+    file."""
+    from imaging_scripts.timeseries.rois import ROICollection
+
+    mat_dict = {}
+    for k, v in data.items():
+        if isinstance(v, Traces):
+            current = v.save_mat()
+            if 'fs' not in mat_dict:
+                mat_dict['fs'] = current['fs']
+            mat_dict[k] = current['data']
+        elif isinstance(v, Events):
+            current = v.save_mat()
+            mat_dict[k] = current['spike_frames']
+        elif isinstance(v, ROICollection):
+            current = ROICollection._save_mat(None, v.rois, v.image_shape, ids=v.ids)
+            if 'image_shape' not in mat_dict:
+                mat_dict['image_shape'] = current['image_shape']
+            current['ids'] = [roi['id'] for roi in current['roiList']]
+            mat_dict[k] = current['roiList']
+        else:
+            raise Warning(
+                f"Only Traces, Events, and ROICollection objects "          
+                f"supported, got {type(v)} for key '{k}'.")
+
+        # Set primary ids object if not already defined
+        if 'ids' not in mat_dict:
+            mat_dict['ids'] = current['ids']
+        # If primary ids object does not match v's ids, save v's ids separately
+        if [*mat_dict['ids']] != [*current['ids']]:
+            mat_dict[f'{k}_ids'] = current['ids']
+
+    if path is not None:
+        sio.savemat(str(path), mat_dict)
+    return mat_dict
